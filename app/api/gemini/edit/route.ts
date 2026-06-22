@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { apiKey, model, prompt, image, mimeType, referenceImage, referenceMimeType } = body;
+  const { apiKey, model, prompt, image, mimeType, referenceImage, referenceMimeType, mode, contextHintImage } = body;
 
   if (!apiKey) {
     return NextResponse.json({ error: "API key is required" }, { status: 400 });
@@ -16,7 +16,31 @@ export async function POST(req: NextRequest) {
 
   let parts: Array<Record<string, unknown>>;
 
-  if (referenceImage) {
+  if (mode === "context" && contextHintImage) {
+    // Context-aware region edit: the model sees the whole scene plus a copy with
+    // the edit region outlined, and is told to change only that region. The
+    // client composites just the masked pixels back, so the rest is protected.
+    parts = [
+      { text: "Image to edit:" },
+      { inline_data: { mime_type: mimeType || "image/png", data: image } },
+      { text: "The region to edit is outlined in magenta in this copy:" },
+      { inline_data: { mime_type: "image/png", data: contextHintImage } },
+      {
+        text:
+          `Edit ONLY the region inside the magenta outline: ${prompt}. ` +
+          `Use the rest of the image as context so the edit matches the scene's ` +
+          `lighting, color, perspective, and style. Leave everything outside the ` +
+          `outline pixel-for-pixel identical, and do not draw the magenta outline ` +
+          `in your output.`,
+      },
+    ];
+    if (referenceImage) {
+      parts.push(
+        { text: "Reference image:" },
+        { inline_data: { mime_type: referenceMimeType || "image/png", data: referenceImage } }
+      );
+    }
+  } else if (referenceImage) {
     parts = [
       { text: "Image to edit:" },
       {

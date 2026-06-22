@@ -154,6 +154,49 @@ export function computeScale(s: ScaleStart, pointerDoc: Vec, uniform = false): T
   return { ...s.t0, scaleX: sX, scaleY: sY, x: s.anchorDoc.x - rotated.x, y: s.anchorDoc.y - rotated.y };
 }
 
+// --- Text box resize -------------------------------------------------------
+// A text layer's width is its wrap width (`boxWidth`), and its height is derived
+// from the wrapped content. So horizontal handles must change boxWidth — NOT
+// scaleX (which would stretch/skew the glyphs). The opposite vertical edge stays
+// pinned in doc space; the dragged edge follows the pointer along the local x
+// axis. Top/bottom-only handles don't change width (auto height), so they're
+// rejected here.
+
+const MIN_TEXT_WIDTH = 16; // min wrap width in doc px
+
+export interface TextResizeStart {
+  t0: Transform;
+  fx: number;        // 0 = left handle (right edge pinned) | 1 = right handle (left edge pinned)
+  pinnedTopDoc: Vec; // top corner of the pinned vertical edge, fixed for the whole drag
+}
+
+// Returns null for handles that don't control width (t / b).
+export function beginTextResize(t0: Transform, w0: number, handle: ScaleHandle): TextResizeStart | null {
+  const { fx } = HANDLE_FRAC[handle];
+  if (fx === 0.5) return null;
+  const pinnedTopDoc = affinePoint(t0, (1 - fx) * w0, 0); // opposite edge's top corner
+  return { t0, fx, pinnedTopDoc };
+}
+
+export function computeTextResize(s: TextResizeStart, pointerDoc: Vec): { boxWidth: number; transform: Transform } {
+  const dirX = rotate({ x: 1, y: 0 }, s.t0.rotation); // unit local-x axis, in doc space
+  const v = { x: pointerDoc.x - s.pinnedTopDoc.x, y: pointerDoc.y - s.pinnedTopDoc.y };
+  const proj = v.x * dirX.x + v.y * dirX.y; // signed distance pointer→pinned along local x (doc units)
+  const sx = s.t0.scaleX || 1;
+  const boxWidth = Math.max(MIN_TEXT_WIDTH, Math.abs(proj) / Math.abs(sx));
+
+  // Keep the pinned vertical edge fixed. Right handle: pinned IS the origin, so
+  // the origin doesn't move. Left handle: pinned is the right edge, so move the
+  // origin to sit boxWidth to its left (in the rotated/scaled local x).
+  let { x, y } = s.t0;
+  if (s.fx === 0) {
+    const off = rotate({ x: boxWidth * sx, y: 0 }, s.t0.rotation);
+    x = s.pinnedTopDoc.x - off.x;
+    y = s.pinnedTopDoc.y - off.y;
+  }
+  return { boxWidth, transform: { ...s.t0, x, y } };
+}
+
 export interface RotateStart {
   t0: Transform;
   w0: number;

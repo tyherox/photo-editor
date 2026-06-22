@@ -125,6 +125,13 @@ export function defaultTransform(x = 0, y = 0): Transform {
   return { x, y, scaleX: 1, scaleY: 1, rotation: 0 };
 }
 
+// Duplicate a layer with a fresh id. Raster bitmaps are shared by `assetId`, so
+// the copy reuses the same AssetCache entry (no bitmap copy). The group link is
+// dropped by default; pass `{ groupId }` to place the copy in a (new) group.
+export function cloneLayer(layer: Layer, overrides: Partial<LayerBase> = {}): Layer {
+  return { ...layer, id: newId(), groupId: undefined, ...overrides } as Layer;
+}
+
 function baseLayer(name: string, transform: Transform): LayerBase {
   return {
     id: newId(),

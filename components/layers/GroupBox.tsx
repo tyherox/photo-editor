@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type PointerEvent as ReactPointerEvent } from "react";
-import { contentSize, type Layer, type Transform } from "@/lib/doc/types";
+import { cloneLayer, contentSize, newId, type Layer, type Transform } from "@/lib/doc/types";
 import { useDoc, useDocActions } from "@/lib/doc/DocContext";
 import { measureTextLayout } from "@/lib/doc/render";
 import { screenToDoc, type Vec } from "@/lib/doc/geometry";
@@ -32,11 +32,13 @@ export default function GroupBox({
   viewport,
   getWorldRect,
   snap,
+  onSelect,
 }: {
   layers: Layer[];
   viewport: Viewport;
   getWorldRect: () => DOMRect | null;
   snap: SnapConfig;
+  onSelect?: (id: string | null, additive?: boolean) => void;
 }) {
   const doc = useDoc();
   const { doAction, commit } = useDocActions();
@@ -66,10 +68,27 @@ export default function GroupBox({
     e.preventDefault();
     const worldRect = getWorldRect();
     if (!worldRect) return;
+    // Alt/Option-drag duplicates the whole selection (Figma-style) and drags the
+    // copies. A shared group is reproduced as a fresh group; a loose multi-select
+    // copies as a loose multi-select. Copies start unlocked so they can move.
+    // LAYER_ADDs coalesce into one undo step.
+    let members = layers.map((l) => ({ id: l.id, transform: l.transform }));
+    if (e.altKey && onSelect) {
+      const grouped = layers.every((l) => l.groupId && l.groupId === layers[0].groupId);
+      const groupId = grouped ? newId() : undefined;
+      const clones = layers.map((l) => cloneLayer(l, { groupId, locked: false }));
+      clones.forEach((c) => doAction({ type: "LAYER_ADD", layer: c }, true));
+      clones.forEach((c, i) => onSelect(c.id, i > 0));
+      members = clones.map((c) => ({ id: c.id, transform: c.transform }));
+    } else {
+      // Locked layers stay put even when part of a multi-selection.
+      members = members.filter((m) => !layers.find((l) => l.id === m.id)?.locked);
+      if (members.length === 0) return;
+    }
     setDrag({
       worldRect,
       pointer0: screenToDoc(e.clientX, e.clientY, worldRect, zoom),
-      members: layers.map((l) => ({ id: l.id, transform: l.transform })),
+      members,
       u0: { minX, minY, maxX, maxY },
     });
   };

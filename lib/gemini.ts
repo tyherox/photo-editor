@@ -7,6 +7,12 @@ export interface GeminiEditRequest {
   referenceImage?: string;
   referenceMimeType?: string;
   signal?: AbortSignal;
+  // Context-aware region edit: `image` is the clean full scene, `contextHintImage`
+  // is the same scene with the edit region outlined in magenta. The model is told
+  // to change only that region; the caller composites just the masked pixels back,
+  // so the rest of the image is left untouched.
+  mode?: "context";
+  contextHintImage?: string;
 }
 
 export interface GeminiEditResponse {

@@ -18,6 +18,7 @@ import {
 import { hasVisibleContent, renderDocToCanvas, renderLayersToCanvas } from "@/lib/doc/render";
 import { aiEditFullDocument } from "@/lib/doc/aiEditDoc";
 import { cropRegions, editMaskedRegionPatches, reservedBBox, type AreaBackend } from "@/lib/doc/maskEdit";
+import { editRegionWithContextPatches } from "@/lib/doc/contextEdit";
 import { splitRasterLayer } from "@/lib/doc/splitLayer";
 import type { BBox } from "@/lib/crop-inpaint-stitch";
 import { useAiJobs, type PatchResult } from "@/lib/doc/useAiJobs";
@@ -107,6 +108,9 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
   const [maskDirty, setMaskDirty] = useState(false);
   const [cropBoxes, setCropBoxes] = useState<BBox[]>([]);
   const [freezeArmed, setFreezeArmed] = useState(false);
+  // Masked Gemini edits are context-aware by default (the model sees the whole
+  // scene); "isolated" opts into the legacy crop-only path for max-detail fixes.
+  const [isolated, setIsolated] = useState(false);
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
   const [referencePreview, setReferencePreview] = useState<string | null>(null);
   const [refOriginalDataUrl, setRefOriginalDataUrl] = useState<string | null>(null);
@@ -114,6 +118,33 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
   const fileInputRef = useRef<HTMLInputElement>(null);
   const refInputRef = useRef<HTMLInputElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const promptInputRef = useRef<HTMLInputElement>(null);
+  // Recent prompts (most-recent first) for ↑/↓ recall, persisted across sessions.
+  // Kept in a ref (never rendered) — avoids hydration concerns and re-renders.
+  const promptHistory = useRef<string[]>([]);
+  const histIdx = useRef(-1); // -1 = editing a fresh draft, ≥0 = recalled entry
+
+  useEffect(() => {
+    try {
+      const h = JSON.parse(localStorage.getItem("ai-prompt-history") || "[]");
+      if (Array.isArray(h)) promptHistory.current = h.filter((s) => typeof s === "string");
+    } catch {
+      /* no/corrupt history — start empty */
+    }
+  }, []);
+
+  // Push a used prompt to the front (deduped), cap the list, and persist.
+  const recordPrompt = useCallback((p: string) => {
+    const t = p.trim();
+    if (!t) return;
+    promptHistory.current = [t, ...promptHistory.current.filter((x) => x !== t)].slice(0, 25);
+    histIdx.current = -1;
+    try {
+      localStorage.setItem("ai-prompt-history", JSON.stringify(promptHistory.current));
+    } catch {
+      /* storage full / unavailable — recall just won't persist */
+    }
+  }, []);
 
   function handleReferenceUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -161,7 +192,14 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
     [cache, doAction]
   );
 
-  const { jobs, reservations, launch, cancel, unfreeze, overlapsReserved } = useAiJobs(onPatches);
+  const { jobs, reservations, launch, cancel, accept, reject, retry, unfreeze, overlapsReserved } = useAiJobs(onPatches);
+
+  // Results awaiting review, as doc-space preview items for the Stage overlay.
+  // The data-URL encoding is done once in the hook (stable refs), so this is a
+  // cheap render-time derivation.
+  const pendingResults = jobs
+    .filter((j) => j.status === "review" && j.resultSrcs)
+    .map((j) => ({ id: j.id, items: j.resultSrcs! }));
 
   const clearMask = useCallback(() => {
     const m = maskCanvasRef.current;
@@ -360,18 +398,24 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
       }
       const snap = snapshotCanvas(mask);
       const p = prompt.trim();
+      if (backend === "gemini") recordPrompt(p);
       const ref = backend === "gemini" ? referenceImage || undefined : undefined;
+      // Default Gemini masked edit is context-aware (whole-image awareness, only
+      // the masked pixels written back); "Isolated" uses the legacy crop path.
+      const useContext = backend === "gemini" && !isolated;
       const id = launch({
         backend,
         prompt: p || (backend === "local" ? "Remove" : ""),
         bbox,
         freeze: freezeArmed,
         run: ({ signal, onProgress }) =>
-          editMaskedRegionPatches(doc, cache, snap, { backend, prompt: p, referenceImage: ref, signal, onProgress }),
+          useContext
+            ? editRegionWithContextPatches(doc, cache, snap, { prompt: p, referenceImage: ref, signal })
+            : editMaskedRegionPatches(doc, cache, snap, { backend, prompt: p, referenceImage: ref, signal, onProgress }),
       });
       if (id) clearMask();
     },
-    [doc, cache, prompt, maskDirty, freezeArmed, referenceImage, launch, overlapsReserved, clearMask]
+    [doc, cache, prompt, maskDirty, freezeArmed, isolated, referenceImage, launch, overlapsReserved, clearMask, recordPrompt]
   );
 
   const generateFull = useCallback(() => {
@@ -386,6 +430,7 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
       return;
     }
     const p = prompt.trim();
+    recordPrompt(p);
     const ref = referenceImage || undefined;
     launch({
       backend: "gemini",
@@ -401,7 +446,7 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
         return [{ bbox, patch: c }];
       },
     });
-  }, [doc, cache, prompt, referenceImage, launch, overlapsReserved]);
+  }, [doc, cache, prompt, referenceImage, launch, overlapsReserved, recordPrompt]);
 
   // Keyboard shortcuts.
   useEffect(() => {
@@ -557,6 +602,26 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
             >
               Freeze
             </button>
+            <span className="mx-1 h-5 w-px bg-zinc-700" />
+            <div
+              className="flex overflow-hidden rounded-md border border-zinc-700"
+              title="How a masked AI edit sees the image"
+            >
+              <button
+                onClick={() => setIsolated(false)}
+                className={`px-2.5 py-1.5 text-sm ${!isolated ? "bg-zinc-700 text-white" : "text-zinc-400 hover:text-white"}`}
+                title="In context — the model sees the whole image and edits only the masked region, so the result matches the scene's lighting, color, and perspective"
+              >
+                In context
+              </button>
+              <button
+                onClick={() => setIsolated(true)}
+                className={`px-2.5 py-1.5 text-sm ${isolated ? "bg-zinc-700 text-white" : "text-zinc-400 hover:text-white"}`}
+                title="Isolated — the model sees only the masked crop. Maximum detail, but blind to the rest of the scene. Best for removal and small fixes."
+              >
+                Isolated
+              </button>
+            </div>
             {running + queued > 0 && (
               <span className="text-xs text-zinc-400">
                 {running} generating{queued ? ` · ${queued} queued` : ""}
@@ -658,6 +723,10 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
             onMaskPaint={onMaskPaint}
             reservations={reservations}
             cropBoxes={cropBoxes}
+            pendingResults={pendingResults}
+            onAcceptResult={accept}
+            onRejectResult={reject}
+            onRetryResult={retry}
             snapEnabled={snapEnabled}
             gridEnabled={gridEnabled}
             gridDivisions={gridDivisions}
@@ -702,8 +771,18 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
                     j.status === "error" ? "bg-red-900/50 text-red-300" : "bg-zinc-800 text-zinc-300"
                   }`}
                 >
-                  {j.status === "error" ? `Error: ${j.error}` : j.status === "queued" ? "Queued" : j.progress || "Generating…"}
-                  <button onClick={() => cancel(j.id)} className="text-zinc-500 hover:text-white" title="Cancel">✕</button>
+                  {j.status === "error"
+                    ? `Error: ${j.error}`
+                    : j.status === "queued"
+                      ? "Queued"
+                      : j.status === "review"
+                        ? "Reviewing — accept on canvas"
+                        : j.progress || "Generating…"}
+                  {j.status === "review" ? (
+                    <button onClick={() => reject(j.id)} className="text-zinc-500 hover:text-white" title="Reject">✕</button>
+                  ) : (
+                    <button onClick={() => cancel(j.id)} className="text-zinc-500 hover:text-white" title="Cancel">✕</button>
+                  )}
                 </span>
               ))}
               {frozen.map((r) => (
@@ -711,6 +790,27 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
                   🔒 Frozen
                   <button onClick={() => unfreeze(r.id)} className="text-blue-300 hover:text-white" title="Unfreeze">unlock</button>
                 </span>
+              ))}
+            </div>
+          )}
+
+          {!prompt.trim() && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {(maskDirty
+                ? ["change the color", "improve the lighting", "replace it with something else"]
+                : ["enhance the colors", "make it more vivid", "give it a cinematic look"]
+              ).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => {
+                    setPrompt(s);
+                    histIdx.current = -1;
+                    promptInputRef.current?.focus();
+                  }}
+                  className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
+                >
+                  {s}
+                </button>
               ))}
             </div>
           )}
@@ -765,15 +865,38 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
               </button>
             )}
             <input
+              ref={promptInputRef}
               type="text"
               value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter") return;
-                if (maskDirty) generateArea("gemini");
-                else generateFull();
+              onChange={(e) => {
+                histIdx.current = -1; // editing a fresh draft, leave recall mode
+                setPrompt(e.target.value);
               }}
-              placeholder={maskDirty ? "Describe the edit for the masked region…" : "Brush a region, or describe a whole-canvas edit…"}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  if (maskDirty) generateArea("gemini");
+                  else generateFull();
+                  return;
+                }
+                // ↑/↓ recall recent prompts (like a shell history).
+                const h = promptHistory.current;
+                if (e.key === "ArrowUp" && h.length) {
+                  e.preventDefault();
+                  histIdx.current = Math.min(histIdx.current + 1, h.length - 1);
+                  setPrompt(h[histIdx.current]);
+                } else if (e.key === "ArrowDown" && histIdx.current >= 0) {
+                  e.preventDefault();
+                  histIdx.current -= 1;
+                  setPrompt(histIdx.current < 0 ? "" : h[histIdx.current]);
+                }
+              }}
+              placeholder={
+                maskDirty
+                  ? isolated
+                    ? "Describe the edit for the masked region (isolated)…"
+                    : "Describe the edit for the masked region (in context)…"
+                  : "Brush a region, or describe a whole-image edit…"
+              }
               className="min-w-[12rem] flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:border-blue-500 focus:outline-none"
             />
             {maskDirty && (
@@ -785,22 +908,27 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
                 Remove
               </button>
             )}
-            {maskDirty && (
+            {maskDirty ? (
               <button
                 onClick={() => generateArea("gemini")}
                 disabled={!prompt.trim()}
+                title={
+                  isolated
+                    ? "Edit the masked region in isolation (model sees only the crop)"
+                    : "Edit the masked region with whole-image context (only masked pixels change)"
+                }
                 className="whitespace-nowrap rounded-lg bg-purple-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-purple-500 disabled:opacity-40"
               >
-                Edit Area
+                Generate
               </button>
-            )}
-            {!maskDirty && (
+            ) : (
               <button
                 onClick={generateFull}
                 disabled={!prompt.trim() || !hasVisibleContent(doc)}
+                title="Edit the whole image"
                 className="whitespace-nowrap rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-40"
               >
-                AI Edit Full
+                Generate
               </button>
             )}
           </div>

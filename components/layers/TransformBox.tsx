@@ -2,21 +2,24 @@
 
 import { useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Layer, Transform } from "@/lib/doc/types";
-import { contentSize } from "@/lib/doc/types";
+import { cloneLayer, contentSize } from "@/lib/doc/types";
 import { useDoc, useDocActions } from "@/lib/doc/DocContext";
 import { measureTextLayout } from "@/lib/doc/render";
 import { aabbOf, computeSnap, type SnapConfig, type SnapGuide } from "@/lib/doc/snapping";
 import {
   beginRotate,
   beginScale,
+  beginTextResize,
   computeMove,
   computeRotate,
   computeScale,
+  computeTextResize,
   cornersDoc,
   screenToDoc,
   type RotateStart,
   type ScaleHandle,
   type ScaleStart,
+  type TextResizeStart,
   type Vec,
 } from "@/lib/doc/geometry";
 
@@ -29,6 +32,7 @@ interface Viewport {
 type Interaction =
   | { kind: "move"; worldRect: DOMRect; zoom: number; t0: Transform; pointerDoc0: Vec }
   | { kind: "scale"; worldRect: DOMRect; zoom: number; start: ScaleStart }
+  | { kind: "textresize"; worldRect: DOMRect; zoom: number; start: TextResizeStart }
   | { kind: "rotate"; worldRect: DOMRect; zoom: number; start: RotateStart };
 
 const HANDLE = 12; // px
@@ -50,11 +54,13 @@ export default function TransformBox({
   viewport,
   getWorldRect,
   snap,
+  onSelect,
 }: {
   layer: Layer;
   viewport: Viewport;
   getWorldRect: () => DOMRect | null;
   snap: SnapConfig;
+  onSelect?: (id: string | null, additive?: boolean) => void;
 }) {
   const doc = useDoc();
   const { doAction, commit } = useDocActions();
@@ -96,7 +102,18 @@ export default function TransformBox({
     const worldRect = getWorldRect();
     if (!worldRect) return;
     const pointerDoc0 = screenToDoc(e.clientX, e.clientY, worldRect, zoom);
-    setInteraction({ kind: "move", worldRect, zoom, t0: layer.transform, pointerDoc0 });
+    // Alt/Option-drag duplicates (Figma-style): drop a copy just above the
+    // original, select it, and drag the copy — the original stays put. The
+    // LAYER_ADD coalesces with the move, so it's a single undo step.
+    let t0 = layer.transform;
+    if (e.altKey && onSelect) {
+      const clone = cloneLayer(layer);
+      const at = doc.layers.findIndex((l) => l.id === layer.id) + 1;
+      doAction({ type: "LAYER_ADD", layer: clone, at }, true);
+      onSelect(clone.id);
+      t0 = clone.transform;
+    }
+    setInteraction({ kind: "move", worldRect, zoom, t0, pointerDoc0 });
   }
 
   function startScale(handle: ScaleHandle) {
@@ -105,6 +122,12 @@ export default function TransformBox({
       e.preventDefault();
       const worldRect = getWorldRect();
       if (!worldRect) return;
+      // Text: resize the wrap width (reflow), never stretch the glyphs.
+      if (layer.type === "text") {
+        const start = beginTextResize(layer.transform, size.w, handle);
+        if (start) setInteraction({ kind: "textresize", worldRect, zoom, start });
+        return;
+      }
       setInteraction({ kind: "scale", worldRect, zoom, start: beginScale(layer.transform, size.w, size.h, handle) });
     };
   }
@@ -162,6 +185,20 @@ export default function TransformBox({
         setGuides([]);
       }
       next = computeScale(interaction.start, pp, e.shiftKey);
+    } else if (interaction.kind === "textresize") {
+      // Snap the dragged edge along x to alignment targets (Alt bypasses).
+      let pp = p;
+      if (snap.enabled && !e.altKey) {
+        const { dx, dy, guides: g } = computeSnap([p.x], [], doc, [layer.id], snap, SNAP_PX / interaction.zoom);
+        pp = { x: p.x + dx, y: p.y + dy };
+        setGuides(g);
+      } else {
+        setGuides([]);
+      }
+      const { boxWidth, transform } = computeTextResize(interaction.start, pp);
+      doAction({ type: "LAYER_PATCH_TEXT", id: layer.id, patch: { boxWidth } }, true);
+      doAction({ type: "LAYER_SET_TRANSFORM", id: layer.id, transform }, true);
+      return;
     } else {
       next = computeRotate(interaction.start, p, e.shiftKey);
     }
@@ -205,8 +242,8 @@ export default function TransformBox({
         }}
       />
 
-      {/* Scale handles */}
-      {SCALE_HANDLES.map((h) => (
+      {/* Scale handles. Text only resizes width, so drop the top/bottom edges. */}
+      {(layer.type === "text" ? SCALE_HANDLES.filter((h) => h !== "t" && h !== "b") : SCALE_HANDLES).map((h) => (
         <div
           key={h}
           onPointerDown={startScale(h)}

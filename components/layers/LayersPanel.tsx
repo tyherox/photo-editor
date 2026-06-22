@@ -306,9 +306,20 @@ export default function LayersPanel({
         </div>
       )}
 
-      {single && (
-        <LayerProperties layer={single} onStartSplit={onStartSplit} onExport={(format) => onExportLayers([single.id], format)} />
-      )}
+      {single &&
+        (single.locked ? (
+          <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-3 text-xs text-zinc-400">
+            <span>🔒 Layer locked — editing disabled.</span>
+            <button
+              onClick={() => doAction({ type: "LAYER_SET_LOCKED", id: single.id, locked: false })}
+              className="ml-auto rounded bg-zinc-800 px-2 py-1 text-white hover:bg-zinc-700"
+            >
+              Unlock
+            </button>
+          </div>
+        ) : (
+          <LayerProperties layer={single} onStartSplit={onStartSplit} onExport={(format) => onExportLayers([single.id], format)} />
+        ))}
 
       <div className="flex-1 overflow-y-auto">
         {display.length === 0 && (
@@ -364,7 +375,7 @@ export default function LayersPanel({
                 />
               ) : (
                 <span
-                  className="min-w-0 flex-1 truncate"
+                  className={`min-w-0 flex-1 truncate ${layer.locked ? "italic text-zinc-500" : ""}`}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     setEditingId(layer.id);

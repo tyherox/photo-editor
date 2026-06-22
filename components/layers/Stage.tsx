@@ -6,6 +6,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from "react";
@@ -36,6 +37,20 @@ const MASK_FILL = "rgba(239,68,68,1)";
 const SNAP_PX = 8; // screen-px snap threshold for measurement endpoints
 
 const midpoint = (a: Vec, b: Vec): Vec => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+// Shared style for the pending-result review buttons (zoom-compensated overlay).
+const pendingBtn = (bg: string): CSSProperties => ({
+  whiteSpace: "nowrap",
+  padding: "4px 10px",
+  borderRadius: 6,
+  fontSize: 13,
+  fontWeight: 500,
+  color: "#fff",
+  background: bg,
+  border: "none",
+  cursor: "pointer",
+  touchAction: "none",
+});
 
 // Candidate snap points so measurements lock to other elements: every visible
 // layer's corners/edge-mids/center, plus the canvas corners/edges/center.
@@ -76,6 +91,10 @@ export default function Stage({
   onMaskPaint,
   reservations = [],
   cropBoxes = [],
+  pendingResults = [],
+  onAcceptResult,
+  onRejectResult,
+  onRetryResult,
   snapEnabled = true,
   gridEnabled = false,
   gridDivisions = 10,
@@ -94,6 +113,10 @@ export default function Stage({
   onMaskPaint?: () => void;
   reservations?: Reservation[];
   cropBoxes?: BBox[];
+  pendingResults?: { id: string; items: { bbox: BBox; src: string }[] }[];
+  onAcceptResult?: (id: string) => void;
+  onRejectResult?: (id: string) => void;
+  onRetryResult?: (id: string) => void;
   snapEnabled?: boolean;
   gridEnabled?: boolean;
   gridDivisions?: number;
@@ -253,6 +276,10 @@ export default function Stage({
   const lastDoc = useRef<Vec | null>(null);
   const rectStart = useRef<Vec | null>(null);
   const [rectPreview, setRectPreview] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+
+  // While a pending result's "Compare" button is held, hide its preview to reveal
+  // the original beneath.
+  const [comparingId, setComparingId] = useState<string | null>(null);
 
   const maskCtx = () => maskCanvasRef?.current?.getContext("2d") ?? null;
   const docPoint = (e: ReactPointerEvent): Vec | null => {
@@ -647,42 +674,135 @@ export default function Stage({
             </div>
           ))}
 
-        {/* AI region reservations: running = red hatch, frozen = blue lock. */}
-        {reservations.map((r) => (
-          <div
-            key={r.id}
-            style={{
-              position: "absolute",
-              left: r.bbox.x,
-              top: r.bbox.y,
-              width: r.bbox.w,
-              height: r.bbox.h,
-              pointerEvents: "none",
-              border: `2px solid ${r.kind === "running" ? "#f87171" : "#60a5fa"}`,
-              backgroundImage: `repeating-linear-gradient(45deg, ${
-                r.kind === "running" ? "rgba(239,68,68,0.18)" : "rgba(96,165,250,0.16)"
-              } 0 8px, transparent 8px 16px)`,
-            }}
-          >
-            <span
+        {/* AI region reservations: running = red hatch, frozen = blue lock.
+            "review" reservations are drawn by the preview overlay below instead. */}
+        {reservations
+          .filter((r) => r.kind !== "review")
+          .map((r) => (
+            <div
+              key={r.id}
               style={{
                 position: "absolute",
-                top: 4,
-                left: 4,
-                transformOrigin: "0 0",
-                transform: `scale(${1 / vp.zoom})`,
-                whiteSpace: "nowrap",
-                padding: "2px 6px",
-                borderRadius: 4,
-                fontSize: 12,
-                color: "#fff",
-                background: "rgba(0,0,0,0.6)",
+                left: r.bbox.x,
+                top: r.bbox.y,
+                width: r.bbox.w,
+                height: r.bbox.h,
+                pointerEvents: "none",
+                border: `2px solid ${r.kind === "running" ? "#f87171" : "#60a5fa"}`,
+                backgroundImage: `repeating-linear-gradient(45deg, ${
+                  r.kind === "running" ? "rgba(239,68,68,0.18)" : "rgba(96,165,250,0.16)"
+                } 0 8px, transparent 8px 16px)`,
               }}
             >
-              {r.kind === "running" ? "Generating…" : "🔒 Frozen"}
-            </span>
-          </div>
-        ))}
+              <span
+                style={{
+                  position: "absolute",
+                  top: 4,
+                  left: 4,
+                  transformOrigin: "0 0",
+                  transform: `scale(${1 / vp.zoom})`,
+                  whiteSpace: "nowrap",
+                  padding: "2px 6px",
+                  borderRadius: 4,
+                  fontSize: 12,
+                  color: "#fff",
+                  background: "rgba(0,0,0,0.6)",
+                }}
+              >
+                {r.kind === "running" ? "Generating…" : "🔒 Frozen"}
+              </span>
+            </div>
+          ))}
+
+        {/* Pending AI results awaiting review: show the feathered patch(es) over
+            the canvas (nothing is in the layer stack yet) with Accept / Reject /
+            Retry, plus hold-to-compare to peek at the original beneath. */}
+        {pendingResults.map((res) => {
+          const hidden = comparingId === res.id;
+          // Union of the result's patch bboxes — anchors the control cluster.
+          const x1 = Math.min(...res.items.map((it) => it.bbox.x));
+          const y1 = Math.min(...res.items.map((it) => it.bbox.y));
+          const x2 = Math.max(...res.items.map((it) => it.bbox.x + it.bbox.w));
+          return (
+            <Fragment key={res.id}>
+              {!hidden &&
+                res.items.map((it, i) => (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    key={i}
+                    src={it.src}
+                    alt=""
+                    style={{
+                      position: "absolute",
+                      left: it.bbox.x,
+                      top: it.bbox.y,
+                      width: it.bbox.w,
+                      height: it.bbox.h,
+                      pointerEvents: "none",
+                    }}
+                  />
+                ))}
+              {/* dashed outline so the reviewed region is visible while comparing */}
+              <div
+                style={{
+                  position: "absolute",
+                  left: x1,
+                  top: y1,
+                  width: x2 - x1,
+                  height: Math.max(...res.items.map((it) => it.bbox.y + it.bbox.h)) - y1,
+                  pointerEvents: "none",
+                  boxSizing: "border-box",
+                  border: "2px dashed #a78bfa",
+                }}
+              />
+              <div
+                onPointerDown={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute",
+                  left: x1,
+                  top: y1,
+                  transformOrigin: "0 100%",
+                  transform: `translateY(-6px) scale(${1 / vp.zoom})`,
+                  marginTop: -6,
+                  display: "flex",
+                  gap: 4,
+                  pointerEvents: "auto",
+                }}
+              >
+                <button
+                  onClick={() => onAcceptResult?.(res.id)}
+                  style={pendingBtn("#16a34a")}
+                  title="Keep this result (adds it as a layer)"
+                >
+                  ✓ Accept
+                </button>
+                <button
+                  onClick={() => onRetryResult?.(res.id)}
+                  style={pendingBtn("#7c3aed")}
+                  title="Generate again with the same prompt"
+                >
+                  ↻ Retry
+                </button>
+                <button
+                  onClick={() => onRejectResult?.(res.id)}
+                  style={pendingBtn("#52525b")}
+                  title="Discard this result"
+                >
+                  ✕ Reject
+                </button>
+                <button
+                  onPointerDown={() => setComparingId(res.id)}
+                  onPointerUp={() => setComparingId(null)}
+                  onPointerLeave={() => setComparingId((c) => (c === res.id ? null : c))}
+                  style={pendingBtn("#3f3f46")}
+                  title="Hold to compare with the original"
+                >
+                  ⇄ Compare
+                </button>
+              </div>
+            </Fragment>
+          );
+        })}
 
         {/* Grid overlay — rendered last so it sits on top of the layers. */}
         {gridEnabled && (
@@ -707,6 +827,7 @@ export default function Stage({
           viewport={vp}
           getWorldRect={getWorldRect}
           snap={{ enabled: snapEnabled, grid: gridEnabled, gridDivisions }}
+          onSelect={onSelect}
         />
       )}
 
@@ -716,6 +837,7 @@ export default function Stage({
           viewport={vp}
           getWorldRect={getWorldRect}
           snap={{ enabled: snapEnabled, grid: gridEnabled, gridDivisions }}
+          onSelect={onSelect}
         />
       )}
 

@@ -372,6 +372,43 @@ function buildPatch(
   return out;
 }
 
+// Like buildPatch, but the source is a FULL-document-sized result (e.g. a
+// whole-image context edit) rather than a small per-region crop. Reads the
+// result's pixels straight out of `bbox` (no resize), feathers the mask the same
+// way, and returns a bbox-sized RGBA patch. Drawn on top of the composite it
+// blends exactly like stitchBack — so only the masked pixels change and any
+// content the model altered outside the mask is discarded.
+export function patchFromFullResult(
+  fullResult: HTMLCanvasElement,
+  maskCanvas: HTMLCanvasElement,
+  bbox: BBox,
+  blendRadius: number
+): HTMLCanvasElement {
+  const resultData = fullResult.getContext("2d")!.getImageData(bbox.x, bbox.y, bbox.w, bbox.h);
+  const maskData = maskCanvas.getContext("2d")!.getImageData(bbox.x, bbox.y, bbox.w, bbox.h);
+
+  const alpha = new Float32Array(bbox.w * bbox.h);
+  for (let i = 0; i < alpha.length; i++) {
+    alpha[i] = maskData.data[i * 4 + 3] > 10 ? 1.0 : 0.0;
+  }
+  const blurred = blendRadius > 0 ? boxBlur(alpha, bbox.w, bbox.h, blendRadius) : alpha;
+
+  const out = document.createElement("canvas");
+  out.width = bbox.w;
+  out.height = bbox.h;
+  const octx = out.getContext("2d")!;
+  const patch = octx.createImageData(bbox.w, bbox.h);
+  for (let i = 0; i < alpha.length; i++) {
+    const pi = i * 4;
+    patch.data[pi] = resultData.data[pi];
+    patch.data[pi + 1] = resultData.data[pi + 1];
+    patch.data[pi + 2] = resultData.data[pi + 2];
+    patch.data[pi + 3] = Math.round(blurred[i] * 255);
+  }
+  octx.putImageData(patch, 0, 0);
+  return out;
+}
+
 // Expand a box by an ABSOLUTE pixel amount on each side, clamped to the image.
 export function padBBox(b: BBox, px: number, imgW: number, imgH: number): BBox {
   const x = Math.max(0, b.x - px);

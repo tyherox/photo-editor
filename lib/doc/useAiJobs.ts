@@ -10,7 +10,9 @@ const GEMINI_CONCURRENCY = 3; // local MI-GAN is single-session → serial (1)
 export interface Reservation {
   id: string;
   bbox: BBox;
-  kind: "running" | "frozen";
+  // "review": result is generated and awaiting accept/reject — the region stays
+  // reserved so a new edit can't overlap something the user is still judging.
+  kind: "running" | "review" | "frozen";
 }
 
 export interface PatchResult {
@@ -29,9 +31,14 @@ export interface AiJob {
   backend: AreaBackend;
   prompt: string;
   bbox: BBox;
-  status: "queued" | "running" | "error";
+  status: "queued" | "running" | "review" | "error";
   error?: string;
   progress?: string;
+  // Set once status === "review": the feathered patches awaiting accept/reject,
+  // plus a one-time data-URL encoding of each for the preview overlay (stable
+  // reference so the preview <img> doesn't reload on unrelated re-renders).
+  result?: PatchResult[];
+  resultSrcs?: { bbox: BBox; src: string }[];
 }
 
 interface InternalJob extends AiJob {
@@ -73,6 +80,8 @@ export function useAiJobs(onPatches: (patches: PatchResult[]) => void) {
         status: j.status,
         error: j.error,
         progress: j.progress,
+        result: j.result,
+        resultSrcs: j.resultSrcs,
       }))
     );
     setReservations(resRef.current.map((r) => ({ ...r })));
@@ -94,11 +103,17 @@ export function useAiJobs(onPatches: (patches: PatchResult[]) => void) {
         },
       })
       .then((patches) => {
-        onPatchesRef.current(patches);
-        jobsRef.current = jobsRef.current.filter((j) => j.id !== job.id);
-        resRef.current = job.freeze
-          ? resRef.current.map((r) => (r.id === job.id ? { ...r, kind: "frozen" } : r))
-          : resRef.current.filter((r) => r.id !== job.id);
+        // Don't commit yet — hold the result for review. The region stays
+        // reserved (kind "review") so nothing can overlap it until the user
+        // accepts or rejects. Commit happens in accept().
+        const j = jobsRef.current.find((x) => x.id === job.id);
+        if (j) {
+          j.status = "review";
+          j.result = patches;
+          j.resultSrcs = patches.map((p) => ({ bbox: p.bbox, src: p.patch.toDataURL() }));
+          j.progress = undefined;
+        }
+        resRef.current = resRef.current.map((r) => (r.id === job.id ? { ...r, kind: "review" } : r));
       })
       .catch((e: unknown) => {
         if (job.controller?.signal.aborted) {
@@ -167,10 +182,49 @@ export function useAiJobs(onPatches: (patches: PatchResult[]) => void) {
     pump();
   }
 
+  // Commit a reviewed result as layer(s), then freeze-or-free its region exactly
+  // as the auto-commit path used to.
+  function accept(id: string) {
+    const job = jobsRef.current.find((j) => j.id === id);
+    if (!job || job.status !== "review" || !job.result) return;
+    onPatchesRef.current(job.result);
+    jobsRef.current = jobsRef.current.filter((j) => j.id !== id);
+    resRef.current = job.freeze
+      ? resRef.current.map((r) => (r.id === id ? { ...r, kind: "frozen" } : r))
+      : resRef.current.filter((r) => r.id !== id);
+    sync();
+    pump();
+  }
+
+  // Discard a reviewed result and free its region.
+  function reject(id: string) {
+    jobsRef.current = jobsRef.current.filter((j) => j.id !== id);
+    resRef.current = resRef.current.filter((r) => r.id !== id);
+    sync();
+    pump();
+  }
+
+  // Re-run a job's original thunk (same prompt/snapshot/bbox) — from a result the
+  // user didn't like, or from an error. Its region stays reserved while it reruns.
+  function retry(id: string) {
+    const job = jobsRef.current.find((j) => j.id === id);
+    if (!job) return;
+    job.status = "queued";
+    job.result = undefined;
+    job.resultSrcs = undefined;
+    job.error = undefined;
+    job.progress = undefined;
+    resRef.current = resRef.current.some((r) => r.id === id)
+      ? resRef.current.map((r) => (r.id === id ? { ...r, kind: "running" } : r))
+      : [...resRef.current, { id, bbox: job.bbox, kind: "running" }];
+    sync();
+    pump();
+  }
+
   function unfreeze(id: string) {
     resRef.current = resRef.current.filter((r) => !(r.id === id && r.kind === "frozen"));
     sync();
   }
 
-  return { jobs, reservations, launch, cancel, unfreeze, overlapsReserved };
+  return { jobs, reservations, launch, cancel, accept, reject, retry, unfreeze, overlapsReserved };
 }
