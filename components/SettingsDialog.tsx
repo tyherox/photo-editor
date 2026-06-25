@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { MODELS, DEFAULT_MODEL } from "@/lib/gemini";
+import { MODELS, DEFAULT_MODEL, IMAGE_SIZES, modelSupportsImageSize, type ImageSize } from "@/lib/gemini";
 import { useEscapeKey } from "@/lib/useEscapeKey";
 
 export type InpaintBackend = "gemini" | "local";
@@ -14,12 +14,14 @@ interface Props {
 export default function SettingsDialog({ open, onClose }: Props) {
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState<string>(DEFAULT_MODEL);
+  const [imageSize, setImageSize] = useState<ImageSize>("1K");
   const [backend, setBackend] = useState<InpaintBackend>("gemini");
   const [keyError, setKeyError] = useState<string | null>(null);
 
   useEffect(() => {
     setApiKey(localStorage.getItem("gemini-api-key") || "");
     setModel(localStorage.getItem("gemini-model") || DEFAULT_MODEL);
+    setImageSize((localStorage.getItem("gemini-image-size") as ImageSize) || "1K");
     setBackend(
       (localStorage.getItem("inpaint-backend") as InpaintBackend) || "gemini"
     );
@@ -42,6 +44,7 @@ export default function SettingsDialog({ open, onClose }: Props) {
     }
     localStorage.setItem("gemini-api-key", apiKey.trim());
     localStorage.setItem("gemini-model", model);
+    localStorage.setItem("gemini-image-size", imageSize);
     localStorage.setItem("inpaint-backend", backend);
     onClose();
   }
@@ -103,7 +106,7 @@ export default function SettingsDialog({ open, onClose }: Props) {
             <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-white text-sm mb-6 focus:outline-none focus:border-blue-500"
+              className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-white text-sm mb-4 focus:outline-none focus:border-blue-500"
             >
               {MODELS.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -111,6 +114,25 @@ export default function SettingsDialog({ open, onClose }: Props) {
                 </option>
               ))}
             </select>
+
+            <label className="block text-sm text-zinc-400 mb-1">Output resolution</label>
+            <select
+              value={imageSize}
+              onChange={(e) => setImageSize(e.target.value as ImageSize)}
+              disabled={!modelSupportsImageSize(model)}
+              className="w-full px-3 py-2 bg-zinc-800 border border-zinc-600 rounded-lg text-white text-sm mb-1 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+            >
+              {IMAGE_SIZES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-zinc-500 mb-6">
+              {modelSupportsImageSize(model)
+                ? "Higher resolutions are sharper but slower and cost more per image."
+                : "Only Gemini 3.x models support resolution selection; this model always outputs ~1K."}
+            </p>
           </>
         )}
 

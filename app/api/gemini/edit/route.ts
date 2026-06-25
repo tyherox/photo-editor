@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { modelSupportsImageSize } from "@/lib/gemini";
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { apiKey, model, prompt, image, mimeType, referenceImage, referenceMimeType, mode, contextHintImage, rawPrompt, maskImage, maskMimeType } = body;
+  const { apiKey, model, prompt, image, mimeType, referenceImage, referenceMimeType, mode, contextHintImage, rawPrompt, imageSize } = body;
 
   if (!apiKey) {
     return NextResponse.json({ error: "API key is required" }, { status: 400 });
@@ -16,26 +17,24 @@ export async function POST(req: NextRequest) {
 
   let parts: Array<Record<string, unknown>>;
 
-  // `prompt` is the fully-assembled instruction the client built and showed the
-  // user (rawPrompt). For older/raw callers we fall back to the legacy wrapping so
-  // behavior is unchanged when the flag is absent.
   if (mode === "context" && contextHintImage) {
     // Context-aware region edit: the model sees the whole scene plus a copy with
     // the edit region outlined, and is told to change only that region. The
     // client composites just the masked pixels back, so the rest is protected.
-    const instruction = rawPrompt
-      ? prompt
-      : `Edit ONLY the region inside the magenta outline: ${prompt}. ` +
-        `Use the rest of the image as context so the edit matches the scene's ` +
-        `lighting, color, perspective, and style. Leave everything outside the ` +
-        `outline pixel-for-pixel identical, and do not draw the magenta outline ` +
-        `in your output.`;
     parts = [
       { text: "Image to edit:" },
       { inline_data: { mime_type: mimeType || "image/png", data: image } },
       { text: "The region to edit is outlined in magenta in this copy:" },
       { inline_data: { mime_type: "image/png", data: contextHintImage } },
-      { text: instruction },
+      {
+        text: rawPrompt
+          ? prompt
+          : `Edit ONLY the region inside the magenta outline: ${prompt}. ` +
+            `Use the rest of the image as context so the edit matches the scene's ` +
+            `lighting, color, perspective, and style. Leave everything outside the ` +
+            `outline pixel-for-pixel identical, and do not draw the magenta outline ` +
+            `in your output.`,
+      },
     ];
     if (referenceImage) {
       parts.push(
@@ -43,24 +42,24 @@ export async function POST(req: NextRequest) {
         { inline_data: { mime_type: referenceMimeType || "image/png", data: referenceImage } }
       );
     }
-  } else if (referenceImage || maskImage) {
+  } else if (referenceImage) {
     parts = [
       { text: "Image to edit:" },
-      { inline_data: { mime_type: mimeType || "image/png", data: image } },
+      {
+        inline_data: {
+          mime_type: mimeType || "image/png",
+          data: image,
+        },
+      },
+      { text: "Reference image:" },
+      {
+        inline_data: {
+          mime_type: referenceMimeType || "image/png",
+          data: referenceImage,
+        },
+      },
+      { text: rawPrompt ? prompt : `Instructions: ${prompt}` },
     ];
-    if (maskImage) {
-      parts.push(
-        { text: "Mask (white marks the area to change, black is off-limits):" },
-        { inline_data: { mime_type: maskMimeType || "image/png", data: maskImage } }
-      );
-    }
-    if (referenceImage) {
-      parts.push(
-        { text: "Reference image:" },
-        { inline_data: { mime_type: referenceMimeType || "image/png", data: referenceImage } }
-      );
-    }
-    parts.push({ text: rawPrompt ? prompt : `Instructions: ${prompt}` });
   } else {
     parts = [
       { text: prompt },
@@ -73,11 +72,18 @@ export async function POST(req: NextRequest) {
     ];
   }
 
+  // Resolution is only meaningful on models that support it (Gemini 3.x); for
+  // others we omit imageConfig so the request stays at the model's default.
+  const generationConfig: Record<string, unknown> = {
+    responseModalities: ["TEXT", "IMAGE"],
+  };
+  if (imageSize && modelSupportsImageSize(geminiModel)) {
+    generationConfig.imageConfig = { imageSize };
+  }
+
   const geminiBody = {
     contents: [{ parts }],
-    generationConfig: {
-      responseModalities: ["TEXT", "IMAGE"],
-    },
+    generationConfig,
   };
 
   const geminiRes = await fetch(url, {

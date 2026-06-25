@@ -1,7 +1,7 @@
 import type { Doc } from "./types";
 import type { AssetCache } from "./assetCache";
 import { renderDocToCanvas } from "./render";
-import { editImage, DEFAULT_MODEL } from "@/lib/gemini";
+import { editImage, DEFAULT_MODEL, type ImageSize } from "@/lib/gemini";
 import { imageToBase64, base64ToImage } from "@/lib/canvas-utils";
 
 // Headline AI feature, kept alive non-destructively: flatten the whole document
@@ -18,6 +18,7 @@ export async function aiEditFullDocument(
   const apiKey = localStorage.getItem("gemini-api-key");
   if (!apiKey) throw new Error("API key is required — set it in Settings.");
   const model = localStorage.getItem("gemini-model") || DEFAULT_MODEL;
+  const imageSize = (localStorage.getItem("gemini-image-size") as ImageSize) || undefined;
 
   const flat = renderDocToCanvas(doc, cache);
   const result = await editImage({
@@ -26,6 +27,7 @@ export async function aiEditFullDocument(
     prompt,
     image: imageToBase64(flat),
     mimeType: "image/png",
+    imageSize,
     referenceImage,
     referenceMimeType: referenceImage ? "image/png" : undefined,
     signal,
@@ -39,9 +41,8 @@ export async function aiEditFullDocument(
 // canvas of the SAME pixel dimensions so the result drops straight back into the
 // layer it replaces (or the review patch it came from).
 // `rawPrompt` marks `prompt` as a fully-assembled instruction to send verbatim
-// (full-image generate, where the user may have edited it via the advanced
-// preview). Reprompt callers omit it so their raw instruction flows through
-// unchanged — there's no augmentation to hide on that path.
+// (full-image generate, where the user may have edited it via the Advanced
+// preview). Reprompt callers omit it — their raw instruction has no augmentation.
 export async function aiEditCanvas(
   src: HTMLCanvasElement,
   prompt: string,
@@ -52,6 +53,7 @@ export async function aiEditCanvas(
   const apiKey = localStorage.getItem("gemini-api-key");
   if (!apiKey) throw new Error("API key is required — set it in Settings.");
   const model = localStorage.getItem("gemini-model") || DEFAULT_MODEL;
+  const imageSize = (localStorage.getItem("gemini-image-size") as ImageSize) || undefined;
 
   const result = await editImage({
     apiKey,
@@ -60,6 +62,7 @@ export async function aiEditCanvas(
     rawPrompt,
     image: imageToBase64(src),
     mimeType: "image/png",
+    imageSize,
     referenceImage,
     referenceMimeType: referenceImage ? "image/png" : undefined,
     signal,

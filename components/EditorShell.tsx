@@ -165,7 +165,6 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
     setAdvancedPrompt(localStorage.getItem("ai-advanced-prompt") === "1");
   }, []);
 
-  // Resolve a pending prompt preview, if any (e.g. when the toggle flips off).
   const toggleAdvancedPrompt = useCallback(() => {
     setAdvancedPrompt((v) => {
       const next = !v;
@@ -514,8 +513,7 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
       const p = prompt.trim();
       const ref = backend === "gemini" ? referenceImage || undefined : undefined;
       // Default Gemini masked edit is context-aware (whole-image awareness, only
-      // the masked pixels written back); "Isolated" uses the crop path, now with
-      // the selection mask attached so the model edits only the marked shape.
+      // the masked pixels written back); "Isolated" uses the legacy crop path.
       const useContext = backend === "gemini" && !isolated;
       // Assemble the exact instruction, then (when Advanced is on) let the user
       // review/edit it before anything is sent. Local "Remove" needs no prompt.
@@ -525,7 +523,6 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
           flow: useContext ? "context" : "isolated",
           userPrompt: p,
           hasReference: !!ref,
-          maskAware: !useContext,
         });
         const confirmed = await confirmPrompt(assembled);
         if (confirmed === null) return; // user cancelled the preview
@@ -647,6 +644,39 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
       });
     },
     [doc.layers, cache, launch, overlapsReserved, recordPrompt, cacheCanvasAsset]
+  );
+
+  // Increase a raster layer's pixel resolution on demand (the same resampler the
+  // AI pipeline uses). Keeps the on-canvas size identical — the gain shows when
+  // zooming in or exporting. Capped so we don't allocate an oversized bitmap.
+  const MAX_UPSCALE_DIM = 8192;
+  const upscaleLayer = useCallback(
+    async (layerId: string, factor: number) => {
+      const layer = doc.layers.find((l) => l.id === layerId);
+      if (!layer || layer.type !== "raster") return;
+      const bmp = cache.get(layer.assetId);
+      if (!bmp) {
+        setError("This layer's image is no longer available.");
+        return;
+      }
+      const targetW = Math.round(layer.naturalWidth * factor);
+      const targetH = Math.round(layer.naturalHeight * factor);
+      if (Math.max(targetW, targetH) > MAX_UPSCALE_DIM) {
+        setError(`Upscaling would exceed ${MAX_UPSCALE_DIM}px. Try a smaller factor.`);
+        return;
+      }
+      const { upscale } = await import("@/lib/local-upscale");
+      const out = await upscale(bitmapToCanvas(bmp), targetW, targetH);
+      const assetId = await cacheCanvasAsset(out);
+      doAction({
+        type: "LAYER_UPSCALE_RASTER",
+        id: layerId,
+        assetId,
+        naturalWidth: out.width,
+        naturalHeight: out.height,
+      });
+    },
+    [doc.layers, cache, cacheCanvasAsset, doAction]
   );
 
   const generateFull = useCallback(async () => {
@@ -811,6 +841,7 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
           canUngroup={!!selectedGroupId}
           onRepromptLayer={(id, p) => void repromptLayer(id, "edit", p)}
           onRetryLayer={(id) => void repromptLayer(id, "retry")}
+          onUpscaleLayer={(id, factor) => void upscaleLayer(id, factor)}
         />
 
         {split && (
@@ -948,7 +979,7 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
             <button
               className={`${btn} ${advancedPrompt ? "bg-zinc-800 text-white" : ""}`}
               onClick={toggleAdvancedPrompt}
-              title="Advanced — review and edit the exact prompt (including blending/region guidance) before each AI edit is sent"
+              title="Advanced — review and edit the exact prompt (including blending and reference-image guidance) before each AI edit is sent"
             >
               Advanced
             </button>

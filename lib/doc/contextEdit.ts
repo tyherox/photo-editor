@@ -1,7 +1,7 @@
 import type { Doc } from "./types";
 import type { AssetCache } from "./assetCache";
 import { renderDocToCanvas } from "./render";
-import { editImage, DEFAULT_MODEL } from "@/lib/gemini";
+import { editImage, DEFAULT_MODEL, type ImageSize } from "@/lib/gemini";
 import { imageToBase64, base64ToImage } from "@/lib/canvas-utils";
 import { getMaskRegions, padBBox, patchFromFullResult, type BBox } from "@/lib/crop-inpaint-stitch";
 
@@ -78,6 +78,7 @@ export async function editRegionWithContextPatches(
   const apiKey = localStorage.getItem("gemini-api-key");
   if (!apiKey) throw new Error("API key is required — set it in Settings.");
   const model = localStorage.getItem("gemini-model") || DEFAULT_MODEL;
+  const imageSize = (localStorage.getItem("gemini-image-size") as ImageSize) || undefined;
 
   const flat = renderDocToCanvas(doc, cache);
   const hint = buildHintImage(flat, maskCanvas);
@@ -90,6 +91,7 @@ export async function editRegionWithContextPatches(
     rawPrompt: true,
     image: imageToBase64(flat),
     mimeType: "image/png",
+    imageSize,
     contextHintImage: hint,
     referenceImage: opts.referenceImage,
     referenceMimeType: opts.referenceImage ? "image/png" : undefined,

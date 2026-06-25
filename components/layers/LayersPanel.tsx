@@ -78,12 +78,14 @@ function LayerProperties({
   onExport,
   onRepromptLayer,
   onRetryLayer,
+  onUpscaleLayer,
 }: {
   layer: Layer;
   onStartSplit: (axis: "x" | "y") => void;
   onExport: (format: "png" | "jpeg") => void;
   onRepromptLayer?: (id: string, prompt: string) => void;
   onRetryLayer?: (id: string) => void;
+  onUpscaleLayer?: (id: string, factor: number) => void;
 }) {
   const { doAction, commit } = useDocActions();
   const [repromptText, setRepromptText] = useState("");
@@ -326,6 +328,31 @@ function LayerProperties({
         </div>
       )}
 
+      {layer.type === "raster" && onUpscaleLayer && (
+        <div className="flex items-center gap-2 text-zinc-400">
+          <span title="Resample to a higher resolution; on-canvas size is unchanged">
+            Upscale
+          </span>
+          <button
+            onClick={() => onUpscaleLayer(layer.id, 2)}
+            className="rounded bg-zinc-800 px-2 py-1 hover:bg-zinc-700"
+            title={`Double resolution (→ ${layer.naturalWidth * 2}×${layer.naturalHeight * 2}px)`}
+          >
+            2×
+          </button>
+          <button
+            onClick={() => onUpscaleLayer(layer.id, 4)}
+            className="rounded bg-zinc-800 px-2 py-1 hover:bg-zinc-700"
+            title={`Quadruple resolution (→ ${layer.naturalWidth * 4}×${layer.naturalHeight * 4}px)`}
+          >
+            4×
+          </button>
+          <span className="ml-auto tabular-nums text-zinc-500">
+            {layer.naturalWidth}×{layer.naturalHeight}
+          </span>
+        </div>
+      )}
+
       <div className="flex items-center gap-2 text-zinc-400">
         <span>Export</span>
         <button onClick={() => onExport("png")} className="rounded bg-zinc-800 px-2 py-1 hover:bg-zinc-700" title="Export this layer as PNG (transparent)">
@@ -350,6 +377,7 @@ export default function LayersPanel({
   canUngroup,
   onRepromptLayer,
   onRetryLayer,
+  onUpscaleLayer,
 }: {
   selectedIds: string[];
   onSelect: (id: string | null, additive?: boolean) => void;
@@ -361,6 +389,7 @@ export default function LayersPanel({
   canUngroup: boolean;
   onRepromptLayer?: (id: string, prompt: string) => void;
   onRetryLayer?: (id: string) => void;
+  onUpscaleLayer?: (id: string, factor: number) => void;
 }) {
   const doc = useDoc();
   const { doAction } = useDocActions();
@@ -430,6 +459,7 @@ export default function LayersPanel({
             onExport={(format) => onExportLayers([single.id], format)}
             onRepromptLayer={onRepromptLayer}
             onRetryLayer={onRetryLayer}
+            onUpscaleLayer={onUpscaleLayer}
           />
         ))}
 

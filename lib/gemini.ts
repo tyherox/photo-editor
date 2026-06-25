@@ -7,14 +7,13 @@ export interface GeminiEditRequest {
   referenceImage?: string;
   referenceMimeType?: string;
   signal?: AbortSignal;
-  // When true, `prompt` is the FULLY-assembled instruction (see promptAssembly.ts)
-  // and the route sends it verbatim — no server-side wrapping. This keeps a single
-  // visible source of truth for what the model receives.
+  // When true, `prompt` is the fully-assembled instruction (assemblePrompt) and
+  // the route sends it verbatim — no server-side wrapping. Keeps one visible
+  // source of truth for what the model receives (shown in the Advanced preview).
   rawPrompt?: boolean;
-  // Isolated edits attach a black/white mask (white = the area to change) so the
-  // model edits only the marked shape, not the whole rectangular crop.
-  maskImage?: string;
-  maskMimeType?: string;
+  // Output resolution tier (generationConfig.imageConfig.imageSize). Only applied
+  // by models that support it (Gemini 3.x); ignored otherwise. See ImageSize.
+  imageSize?: ImageSize;
   // Context-aware region edit: `image` is the clean full scene, `contextHintImage`
   // is the same scene with the edit region outlined in magenta. The model is told
   // to change only that region; the caller composites just the masked pixels back,
@@ -44,6 +43,17 @@ export async function editImage(req: GeminiEditRequest): Promise<GeminiEditRespo
   }
 
   return res.json();
+}
+
+// Output resolution tiers (generationConfig.imageConfig.imageSize). 1K is the
+// model default. Only Gemini 3.x image models honor this; 2.5 Flash ignores it.
+export const IMAGE_SIZES = ["1K", "2K", "4K"] as const;
+export type ImageSize = (typeof IMAGE_SIZES)[number];
+
+// Whether a model honors imageConfig.imageSize (resolution selection). The 2.5
+// Flash image model returns ~1K regardless, so we don't send it there.
+export function modelSupportsImageSize(model: string): boolean {
+  return /^gemini-3/.test(model);
 }
 
 export const MODELS = [

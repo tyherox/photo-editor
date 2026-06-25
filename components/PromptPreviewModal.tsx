@@ -12,8 +12,9 @@ interface Props {
 }
 
 // Advanced "review before send": shows the exact instruction text the model will
-// receive — including any seam/region/mask guidance the app adds — and lets the
-// user edit it. Nothing is sent without passing through here when Advanced is on.
+// receive — including seam/region guidance and the reference-image disambiguation
+// wording — and lets the user edit it. Nothing is sent without passing through
+// here when Advanced is on.
 export default function PromptPreviewModal({ initialPrompt, onConfirm, onCancel }: Props) {
   const [text, setText] = useState(initialPrompt);
   useEscapeKey(onCancel);
@@ -37,7 +38,7 @@ export default function PromptPreviewModal({ initialPrompt, onConfirm, onCancel 
         </div>
         <p className="text-xs text-zinc-400">
           This is the full instruction the app assembled, including blending and
-          region guidance. Edit it if you want — your text is sent verbatim.
+          reference-image guidance. Edit it if you want — your text is sent verbatim.
         </p>
         <textarea
           autoFocus

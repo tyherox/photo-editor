@@ -22,6 +22,10 @@ export type DocAction =
   // Swap a raster layer's bitmap in place (keeps id/name/transform/opacity/order)
   // — used when a reprompt of an AI-edit layer is accepted.
   | { type: "LAYER_REPLACE_RASTER"; id: string; assetId: string; naturalWidth: number; naturalHeight: number; aiEdit?: AiEditRecipe }
+  // Swap a raster layer's bitmap for a higher-resolution version while keeping its
+  // on-canvas size: transform scale is divided by the resolution growth factor, so
+  // the layer looks identical but has more pixels (sharper on zoom/export).
+  | { type: "LAYER_UPSCALE_RASTER"; id: string; assetId: string; naturalWidth: number; naturalHeight: number }
   | { type: "LAYER_GROUP"; ids: string[]; groupId: string }
   | { type: "LAYER_UNGROUP"; groupId: string }
   | { type: "ANNOTATION_ADD"; annotation: Annotation }
@@ -107,6 +111,22 @@ export function docReducer(doc: Doc, action: DocAction): Doc {
           ? { ...l, assetId: action.assetId, naturalWidth: action.naturalWidth, naturalHeight: action.naturalHeight, aiEdit: action.aiEdit }
           : l
       );
+
+    case "LAYER_UPSCALE_RASTER":
+      return mapLayer(doc, action.id, (l) => {
+        if (l.type !== "raster") return l;
+        // Divide scale by the resolution growth so displayed size = natural*scale
+        // stays constant (more pixels, same footprint).
+        const fx = action.naturalWidth / l.naturalWidth;
+        const fy = action.naturalHeight / l.naturalHeight;
+        return {
+          ...l,
+          assetId: action.assetId,
+          naturalWidth: action.naturalWidth,
+          naturalHeight: action.naturalHeight,
+          transform: { ...l.transform, scaleX: l.transform.scaleX / fx, scaleY: l.transform.scaleY / fy },
+        };
+      });
 
     case "LAYER_GROUP": {
       const ids = new Set(action.ids);

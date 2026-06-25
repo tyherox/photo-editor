@@ -1,8 +1,8 @@
 import type { Doc } from "./types";
 import type { AssetCache } from "./assetCache";
 import { renderDocToCanvas } from "./render";
-import { editImage, DEFAULT_MODEL } from "@/lib/gemini";
-import { imageToBase64, base64ToImage, maskCanvasToBlackWhite } from "@/lib/canvas-utils";
+import { editImage, DEFAULT_MODEL, type ImageSize } from "@/lib/gemini";
+import { imageToBase64, base64ToImage } from "@/lib/canvas-utils";
 import { cropInpaintToPatches, getMaskRegions, padBBox, type BBox } from "@/lib/crop-inpaint-stitch";
 import { inpaint as localInpaint, type LoadProgress } from "@/lib/local-inpaint";
 
@@ -20,20 +20,19 @@ const EDIT_PAD_PX = 24; // doc px added on each side of the selection
 const GEMINI_CROP = { targetSize: 1024, padPx: EDIT_PAD_PX, blendRadius: 16, square: false };
 const LOCAL_CROP = { targetSize: 512, padPx: EDIT_PAD_PX, blendRadius: 12, square: false };
 
-// `finalPrompt` is the fully-assembled instruction (assemblePrompt, isolated +
-// maskAware) — sent verbatim. We also attach a black/white mask of the selection
-// so the model edits only the marked shape, not the whole rectangular crop (which
-// otherwise includes the surrounding border pixels the crop unavoidably contains).
+// `finalPrompt` is the fully-assembled instruction (assemblePrompt, isolated
+// flow — seam guidance plus, when a reference is present, image-disambiguation
+// wording). Sent verbatim so the Advanced preview matches exactly what's sent.
 async function geminiInpaintCrop(
   finalPrompt: string,
   croppedImage: HTMLCanvasElement,
-  croppedMask: HTMLCanvasElement,
   referenceImage?: string,
   signal?: AbortSignal
 ): Promise<HTMLCanvasElement> {
   const apiKey = localStorage.getItem("gemini-api-key");
   if (!apiKey) throw new Error("API key is required — set it in Settings.");
   const model = localStorage.getItem("gemini-model") || DEFAULT_MODEL;
+  const imageSize = (localStorage.getItem("gemini-image-size") as ImageSize) || undefined;
 
   const result = await editImage({
     apiKey,
@@ -42,8 +41,7 @@ async function geminiInpaintCrop(
     rawPrompt: true,
     image: imageToBase64(croppedImage),
     mimeType: "image/png",
-    maskImage: imageToBase64(maskCanvasToBlackWhite(croppedMask)),
-    maskMimeType: "image/png",
+    imageSize,
     referenceImage,
     referenceMimeType: referenceImage ? "image/png" : undefined,
     signal,
@@ -113,7 +111,7 @@ export async function editMaskedRegionPatches(
   return cropInpaintToPatches(
     flat,
     maskCanvas,
-    async (img, msk) => geminiInpaintCrop(opts.finalPrompt ?? "", img, msk, opts.referenceImage, opts.signal),
+    async (img) => geminiInpaintCrop(opts.finalPrompt ?? "", img, opts.referenceImage, opts.signal),
     GEMINI_CROP
   );
 }
