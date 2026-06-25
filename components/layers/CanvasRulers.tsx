@@ -10,7 +10,7 @@ import { Fragment } from "react";
 export type RulerUnit = "px" | "%" | "cm" | "in";
 export const RULER_UNITS: RulerUnit[] = ["px", "%", "cm", "in"];
 
-const RULER = 22; // strip thickness, px
+export const RULER = 22; // strip thickness, px
 const DPI = 96; // assumed pixels-per-inch for physical units (cm/in)
 const TARGET_PX = 72; // desired on-screen spacing between major ticks
 
@@ -50,6 +50,30 @@ function formatLabel(u: number, decimals: number): string {
     .toFixed(decimals)
     .replace(/(\.\d*?)0+$/, "$1")
     .replace(/\.$/, "");
+}
+
+// Doc-pixel spacing between minor ticks for the current unit/zoom — the same
+// grid the visible ruler ticks sit on (both reference doc coord 0).
+function minorStepDoc(zoom: number, unit: RulerUnit, docLen: number): number {
+  const k = unitPerPx(unit, docLen);
+  const step = niceStep((TARGET_PX * k) / zoom);
+  return step / 5 / k; // doc px per minor tick
+}
+
+// Nearest ruler tick to `docCoord`, or null if no tick is within `thresholdPx`
+// on-screen pixels. Lets guides lock onto the visible measurement graduations.
+export function nearestTickDoc(docCoord: number, zoom: number, unit: RulerUnit, docLen: number, thresholdPx: number): number | null {
+  const dpx = minorStepDoc(zoom, unit, docLen);
+  if (!(dpx > 0) || !isFinite(dpx)) return null;
+  const snapped = Math.round(docCoord / dpx) * dpx;
+  return Math.abs(snapped - docCoord) * zoom <= thresholdPx ? snapped : null;
+}
+
+// Format a doc coordinate as the ruler would label it, in the current unit.
+export function formatRulerValue(docCoord: number, unit: RulerUnit, docLen: number): string {
+  const v = docCoord * unitPerPx(unit, docLen);
+  const decimals = unit === "px" ? 0 : unit === "%" ? 1 : 2;
+  return `${formatLabel(v, decimals)}${unit === "px" ? "" : unit === "%" ? "%" : ` ${unit}`}`;
 }
 
 interface Tick {

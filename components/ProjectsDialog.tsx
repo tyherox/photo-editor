@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { listProjects, type ProjectSummary } from "@/lib/persist/projectStore";
+import { useEscapeKey } from "@/lib/useEscapeKey";
 
 // The "Open" UI: a grid of saved projects (thumbnail + name + relative time),
 // each openable or deletable, plus entry points to create a new canvas (blank
@@ -23,6 +24,7 @@ export default function ProjectsDialog({
 }) {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  useEscapeKey(onClose);
 
   useEffect(() => {
     let cancelled = false;
@@ -40,9 +42,9 @@ export default function ProjectsDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div className="animate-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="flex max-h-[80vh] w-[44rem] max-w-[92vw] flex-col rounded-xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl"
+        className="animate-dialog flex max-h-[80vh] w-[44rem] max-w-[92vw] flex-col rounded-xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
@@ -76,10 +78,17 @@ export default function ProjectsDialog({
 
         <div className="min-h-[8rem] flex-1 overflow-y-auto">
           {projects === null ? (
-            <div className="flex h-32 items-center justify-center text-xs text-zinc-500">Loading…</div>
+            <div className="flex h-32 items-center justify-center gap-2 text-xs text-zinc-500">
+              <svg className="h-4 w-4 animate-spin text-zinc-600" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Loading…
+            </div>
           ) : projects.length === 0 ? (
-            <div className="flex h-32 items-center justify-center text-xs text-zinc-500">
-              No saved projects yet.
+            <div className="flex h-32 flex-col items-center justify-center gap-1 text-center text-xs text-zinc-500">
+              <span className="text-zinc-400">No saved projects yet</span>
+              <span>Create a new document or open an image to get started.</span>
             </div>
           ) : (
             <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">

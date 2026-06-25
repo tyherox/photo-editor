@@ -40,7 +40,12 @@ export interface WorkspaceMeta {
 export function referencedAssetIds(doc: Doc): string[] {
   const ids = new Set<string>();
   for (const layer of doc.layers) {
-    if (layer.type === "raster") ids.add(layer.assetId);
+    if (layer.type === "raster") {
+      ids.add(layer.assetId);
+      // The reprompt recipe's input snapshot is referenced only here (no visible
+      // layer points at it), so it must be collected explicitly to be persisted.
+      if (layer.aiEdit) ids.add(layer.aiEdit.sourceAssetId);
+    }
   }
   return [...ids];
 }

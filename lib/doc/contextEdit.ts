@@ -20,7 +20,9 @@ const OUTLINE_PX = 4; // magenta locator-outline thickness (doc px)
 const OUTLINE_COLOR = "#ff2bd6";
 
 export interface ContextEditOptions {
-  prompt: string;
+  // Fully-assembled instruction (assemblePrompt, context flow) — already includes
+  // the magenta-outline framing, sent verbatim.
+  finalPrompt: string;
   referenceImage?: string;
   signal?: AbortSignal;
 }
@@ -84,7 +86,8 @@ export async function editRegionWithContextPatches(
     apiKey,
     model,
     mode: "context",
-    prompt: opts.prompt,
+    prompt: opts.finalPrompt,
+    rawPrompt: true,
     image: imageToBase64(flat),
     mimeType: "image/png",
     contextHintImage: hint,

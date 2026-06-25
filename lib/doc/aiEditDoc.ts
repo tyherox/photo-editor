@@ -32,3 +32,43 @@ export async function aiEditFullDocument(
   });
   return base64ToImage(result.image, result.mimeType);
 }
+
+// Simple image→image Gemini edit on a single canvas — no doc, flatten, mask, or
+// context machinery. Used to reprompt an already-generated result ("edit the
+// generated image"): the model sees only `src` and applies `prompt`. Returns a
+// canvas of the SAME pixel dimensions so the result drops straight back into the
+// layer it replaces (or the review patch it came from).
+// `rawPrompt` marks `prompt` as a fully-assembled instruction to send verbatim
+// (full-image generate, where the user may have edited it via the advanced
+// preview). Reprompt callers omit it so their raw instruction flows through
+// unchanged — there's no augmentation to hide on that path.
+export async function aiEditCanvas(
+  src: HTMLCanvasElement,
+  prompt: string,
+  signal?: AbortSignal,
+  referenceImage?: string,
+  rawPrompt?: boolean
+): Promise<HTMLCanvasElement> {
+  const apiKey = localStorage.getItem("gemini-api-key");
+  if (!apiKey) throw new Error("API key is required — set it in Settings.");
+  const model = localStorage.getItem("gemini-model") || DEFAULT_MODEL;
+
+  const result = await editImage({
+    apiKey,
+    model,
+    prompt,
+    rawPrompt,
+    image: imageToBase64(src),
+    mimeType: "image/png",
+    referenceImage,
+    referenceMimeType: referenceImage ? "image/png" : undefined,
+    signal,
+  });
+
+  const img = await base64ToImage(result.image, result.mimeType);
+  const out = document.createElement("canvas");
+  out.width = src.width;
+  out.height = src.height;
+  out.getContext("2d")!.drawImage(img, 0, 0, out.width, out.height);
+  return out;
+}

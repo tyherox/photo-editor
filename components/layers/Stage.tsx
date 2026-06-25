@@ -17,9 +17,11 @@ import {
   areaSplitLines,
   contentSize,
   makeArea,
+  makeGuide,
   makeRuler,
   type AreaAnnotation,
   type Doc,
+  type GuideAnnotation,
   type RulerAnnotation,
 } from "@/lib/doc/types";
 import { measureTextLayout } from "@/lib/doc/render";
@@ -28,7 +30,7 @@ import type { Reservation } from "@/lib/doc/useAiJobs";
 import LayerView from "./LayerView";
 import TransformBox from "./TransformBox";
 import GroupBox from "./GroupBox";
-import CanvasRulers, { RULER_UNITS, type RulerUnit } from "./CanvasRulers";
+import CanvasRulers, { RULER, RULER_UNITS, formatRulerValue, nearestTickDoc, type RulerUnit } from "./CanvasRulers";
 
 export type EditorMode = "view" | "manual" | "ai";
 
@@ -95,6 +97,7 @@ export default function Stage({
   onAcceptResult,
   onRejectResult,
   onRetryResult,
+  onEditResult,
   snapEnabled = true,
   gridEnabled = false,
   gridDivisions = 10,
@@ -117,6 +120,7 @@ export default function Stage({
   onAcceptResult?: (id: string) => void;
   onRejectResult?: (id: string) => void;
   onRetryResult?: (id: string) => void;
+  onEditResult?: (id: string, prompt: string) => void;
   snapEnabled?: boolean;
   gridEnabled?: boolean;
   gridDivisions?: number;
@@ -262,11 +266,14 @@ export default function Stage({
     (e: ReactPointerEvent) => {
       const p = pan.current;
       containerRef.current?.releasePointerCapture(e.pointerId);
-      if (p && !p.moved) onSelect(null);
+      if (p && !p.moved) {
+        onSelect(null);
+        onSelectAnnotation?.(null);
+      }
       pan.current = null;
       setPanning(false);
     },
-    [onSelect]
+    [onSelect, onSelectAnnotation]
   );
 
   const getWorldRect = useCallback(() => worldRef.current?.getBoundingClientRect() ?? null, []);
@@ -280,6 +287,9 @@ export default function Stage({
   // While a pending result's "Compare" button is held, hide its preview to reveal
   // the original beneath.
   const [comparingId, setComparingId] = useState<string | null>(null);
+  // Which pending result has its "Edit" (reprompt) input open, and its draft text.
+  const [editingResultId, setEditingResultId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
 
   const maskCtx = () => maskCanvasRef?.current?.getContext("2d") ?? null;
   const docPoint = (e: ReactPointerEvent): Vec | null => {
@@ -300,6 +310,7 @@ export default function Stage({
     reservations.some((r) => p.x >= r.bbox.x && p.x <= r.bbox.x + r.bbox.w && p.y >= r.bbox.y && p.y <= r.bbox.y + r.bbox.h);
 
   const maskDown = (e: ReactPointerEvent) => {
+    if (spaceDown) return; // Space-pan takes precedence — don't paint or swallow the drag
     e.stopPropagation();
     const ctx = maskCtx();
     const p = docPoint(e);
@@ -502,9 +513,76 @@ export default function Stage({
     setSnapHit(null);
   };
 
+  // --- Guides: drag out of a ruler edge to drop a canvas-spanning line -------
+  // axis "x" = vertical guide (from the left ruler, pins doc x); axis "y" =
+  // horizontal guide (from the top ruler, pins doc y).
+  const guideRef = useRef<{ axis: "x" | "y"; id?: string; worldRect: DOMRect; zoom: number; onRuler: boolean } | null>(null);
+  const [guideDrag, setGuideDrag] = useState<{ axis: "x" | "y"; value: number; onRuler: boolean } | null>(null);
+
+  // Snap a guide's raw doc coordinate to content (layers/canvas/measurements)
+  // first, then fall back to the nearest visible ruler tick. When repositioning,
+  // `excludeId` keeps the dragged guide from magnetizing to its own old position.
+  const snapGuide = (axis: "x" | "y", raw: number, zoom: number, excludeId?: string): number => {
+    if (snapEnabled) {
+      const snapDoc = excludeId ? { ...doc, annotations: doc.annotations.filter((a) => a.id !== excludeId) } : doc;
+      const { dx, dy } = computeSnap(axis === "x" ? [raw] : [], axis === "y" ? [raw] : [], snapDoc, [], { enabled: true, grid: gridEnabled, gridDivisions }, SNAP_PX / zoom);
+      const d = axis === "x" ? dx : dy;
+      if (d !== 0) return raw + d;
+    }
+    const tick = nearestTickDoc(raw, zoom, rulerUnit, axis === "x" ? doc.width : doc.height, 4);
+    return tick ?? raw;
+  };
+
+  // Is the pointer over either ruler strip? Dropping a guide there removes it.
+  const pointerOnRuler = (e: ReactPointerEvent): boolean => {
+    const c = containerRef.current;
+    if (!c) return false;
+    const r = c.getBoundingClientRect();
+    return e.clientX - r.left < RULER || e.clientY - r.top < RULER;
+  };
+
+  const guideStart = (axis: "x" | "y", id?: string) => (e: ReactPointerEvent) => {
+    e.stopPropagation();
+    if (id) onSelectAnnotation?.(id); // grabbing an existing guide selects it
+    const worldRect = getWorldRect();
+    if (!worldRect) return;
+    const zoom = vpRef.current.zoom;
+    guideRef.current = { axis, id, worldRect, zoom, onRuler: false };
+    const p = screenToDoc(e.clientX, e.clientY, worldRect, zoom);
+    setGuideDrag({ axis, value: snapGuide(axis, axis === "x" ? p.x : p.y, zoom, id), onRuler: false });
+  };
+
+  const guideMove = (e: ReactPointerEvent) => {
+    const g = guideRef.current;
+    if (!g) return;
+    const p = screenToDoc(e.clientX, e.clientY, g.worldRect, g.zoom);
+    const onRuler = !!g.id && pointerOnRuler(e); // existing guide dragged back onto ruler → delete
+    g.onRuler = onRuler;
+    const value = snapGuide(g.axis, g.axis === "x" ? p.x : p.y, g.zoom, g.id);
+    setGuideDrag({ axis: g.axis, value, onRuler });
+    if (g.id && !onRuler) doAction({ type: "ANNOTATION_UPDATE", id: g.id, patch: { value } }, true);
+  };
+
+  const guideUp = (e: ReactPointerEvent) => {
+    const g = guideRef.current;
+    const d = guideDrag;
+    if (g && d) {
+      const dropOnRuler = pointerOnRuler(e);
+      if (g.id) {
+        if (dropOnRuler) doAction({ type: "ANNOTATION_DELETE", id: g.id });
+        else commit();
+      } else if (!dropOnRuler) {
+        doAction({ type: "ANNOTATION_ADD", annotation: makeGuide(g.axis, d.value) });
+      }
+    }
+    guideRef.current = null;
+    setGuideDrag(null);
+  };
+
   const annotations = doc.annotations ?? [];
   const rulers = annotations.filter((a): a is RulerAnnotation => a.type === "ruler");
   const areas = annotations.filter((a): a is AreaAnnotation => a.type === "area");
+  const guides = annotations.filter((a): a is GuideAnnotation => a.type === "guide");
   const selectedLayers = doc.layers.filter((l) => selectedIds.includes(l.id));
   const single = selectedLayers.length === 1 ? selectedLayers[0] : undefined;
 
@@ -614,8 +692,10 @@ export default function Stage({
             width: doc.width,
             height: doc.height,
             opacity: 0.5,
-            pointerEvents: mode === "ai" ? "auto" : "none",
-            cursor: "crosshair",
+            // Yield to Space-pan (like View mode's measure surface) so holding
+            // Space lets background drags pan instead of painting the mask.
+            pointerEvents: mode === "ai" && !spaceDown ? "auto" : "none",
+            cursor: spaceDown ? (panning ? "grabbing" : "grab") : "crosshair",
             touchAction: "none",
           }}
         />
@@ -765,40 +845,96 @@ export default function Stage({
                   transform: `translateY(-6px) scale(${1 / vp.zoom})`,
                   marginTop: -6,
                   display: "flex",
+                  flexDirection: "column",
+                  alignItems: "flex-start",
                   gap: 4,
                   pointerEvents: "auto",
                 }}
               >
-                <button
-                  onClick={() => onAcceptResult?.(res.id)}
-                  style={pendingBtn("#16a34a")}
-                  title="Keep this result (adds it as a layer)"
-                >
-                  ✓ Accept
-                </button>
-                <button
-                  onClick={() => onRetryResult?.(res.id)}
-                  style={pendingBtn("#7c3aed")}
-                  title="Generate again with the same prompt"
-                >
-                  ↻ Retry
-                </button>
-                <button
-                  onClick={() => onRejectResult?.(res.id)}
-                  style={pendingBtn("#52525b")}
-                  title="Discard this result"
-                >
-                  ✕ Reject
-                </button>
-                <button
-                  onPointerDown={() => setComparingId(res.id)}
-                  onPointerUp={() => setComparingId(null)}
-                  onPointerLeave={() => setComparingId((c) => (c === res.id ? null : c))}
-                  style={pendingBtn("#3f3f46")}
-                  title="Hold to compare with the original"
-                >
-                  ⇄ Compare
-                </button>
+                <div style={{ display: "flex", gap: 4 }}>
+                  <button
+                    onClick={() => onAcceptResult?.(res.id)}
+                    style={pendingBtn("#16a34a")}
+                    title="Keep this result (adds it as a layer)"
+                  >
+                    ✓ Accept
+                  </button>
+                  <button
+                    onClick={() => onRetryResult?.(res.id)}
+                    style={pendingBtn("#7c3aed")}
+                    title="Try again with the SAME instruction (re-rolls the original ask)"
+                  >
+                    ↻ Retry
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditingResultId((cur) => (cur === res.id ? null : res.id));
+                      setEditText("");
+                    }}
+                    style={pendingBtn(editingResultId === res.id ? "#4338ca" : "#6366f1")}
+                    title="Edit this result with a NEW instruction (refines the generated image)"
+                  >
+                    ✎ Edit
+                  </button>
+                  <button
+                    onClick={() => onRejectResult?.(res.id)}
+                    style={pendingBtn("#52525b")}
+                    title="Discard this result"
+                  >
+                    ✕ Reject
+                  </button>
+                  <button
+                    onPointerDown={() => setComparingId(res.id)}
+                    onPointerUp={() => setComparingId(null)}
+                    onPointerLeave={() => setComparingId((c) => (c === res.id ? null : c))}
+                    style={pendingBtn("#3f3f46")}
+                    title="Hold to compare with the original"
+                  >
+                    ⇄ Compare
+                  </button>
+                </div>
+                {editingResultId === res.id && (
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <input
+                      autoFocus
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && editText.trim()) {
+                          onEditResult?.(res.id, editText.trim());
+                          setEditingResultId(null);
+                          setEditText("");
+                        } else if (e.key === "Escape") {
+                          setEditingResultId(null);
+                          setEditText("");
+                        }
+                      }}
+                      placeholder="Describe a change to this result…"
+                      style={{
+                        width: 260,
+                        padding: "5px 9px",
+                        borderRadius: 6,
+                        fontSize: 13,
+                        color: "#fff",
+                        background: "#27272a",
+                        border: "1px solid #52525b",
+                        outline: "none",
+                      }}
+                    />
+                    <button
+                      onClick={() => {
+                        if (!editText.trim()) return;
+                        onEditResult?.(res.id, editText.trim());
+                        setEditingResultId(null);
+                        setEditText("");
+                      }}
+                      style={pendingBtn("#6366f1")}
+                      title="Generate from this result with the new instruction"
+                    >
+                      Go
+                    </button>
+                  </div>
+                )}
               </div>
             </Fragment>
           );
@@ -1077,6 +1213,63 @@ export default function Stage({
           );
         })()}
 
+      {/* Guide lines (canvas-spanning), clipped to start past the ruler strips. */}
+      <svg className="pointer-events-none absolute inset-0 z-[16] h-full w-full overflow-visible">
+        {guides.map((g) => {
+          const sel = g.id === selectedAnnotationId;
+          const stroke = sel ? "#67e8f9" : "#22d3ee";
+          const sw = sel ? 2 : 1;
+          if (g.axis === "x") {
+            const X = vp.panX + g.value * vp.zoom;
+            return X < RULER || X > containerSize.w ? null : <line key={g.id} x1={X} y1={RULER} x2={X} y2={containerSize.h} stroke={stroke} strokeWidth={sw} />;
+          }
+          const Y = vp.panY + g.value * vp.zoom;
+          return Y < RULER || Y > containerSize.h ? null : <line key={g.id} x1={RULER} y1={Y} x2={containerSize.w} y2={Y} stroke={stroke} strokeWidth={sw} />;
+        })}
+      </svg>
+
+      {/* Grab handles to reposition / delete existing guides (all modes). The
+          thin hit strip sits on the line itself; drop on a ruler to remove. */}
+      {guides.map((g) => {
+          if (g.axis === "x") {
+            const X = vp.panX + g.value * vp.zoom;
+            if (X < RULER || X > containerSize.w) return null;
+            return <div key={g.id} onPointerDown={guideStart(g.axis, g.id)} className="absolute z-20" style={{ left: X - 3, top: RULER, width: 6, height: containerSize.h - RULER, cursor: "ew-resize", touchAction: "none" }} title="Drag to move · drop on the ruler to remove" />;
+          }
+          const Y = vp.panY + g.value * vp.zoom;
+          if (Y < RULER || Y > containerSize.h) return null;
+          return <div key={g.id} onPointerDown={guideStart(g.axis, g.id)} className="absolute z-20" style={{ left: RULER, top: Y - 3, width: containerSize.w - RULER, height: 6, cursor: "ns-resize", touchAction: "none" }} title="Drag to move · drop on the ruler to remove" />;
+        })}
+
+      {/* Selected guide: value pill + delete button anchored at the ruler edge. */}
+      {guides.map((g) => {
+        if (g.id !== selectedAnnotationId) return null;
+        const isX = g.axis === "x";
+        const X = vp.panX + g.value * vp.zoom;
+        const Y = vp.panY + g.value * vp.zoom;
+        if (isX ? X < RULER || X > containerSize.w : Y < RULER || Y > containerSize.h) return null;
+        return (
+          <div
+            key={g.id}
+            className="absolute z-[21] flex items-center gap-1 rounded font-medium tabular-nums"
+            style={{ left: isX ? X + 4 : RULER + 4, top: isX ? RULER + 4 : Y + 4, padding: "1px 6px", fontSize: 11, color: "#06212a", background: "#22d3ee", whiteSpace: "nowrap" }}
+          >
+            {isX ? "X" : "Y"} {formatRulerValue(g.value, rulerUnit, isX ? doc.width : doc.height)}
+            <button
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => {
+                doAction({ type: "ANNOTATION_DELETE", id: g.id });
+                onSelectAnnotation?.(null);
+              }}
+              className="ml-0.5 rounded px-1 text-[10px] hover:bg-black/20"
+              title="Delete guide"
+            >
+              ✕
+            </button>
+          </div>
+        );
+      })}
+
       {/* Full-window capture while measuring. */}
       {measuring && (
         <div
@@ -1085,6 +1278,17 @@ export default function Stage({
           onPointerMove={measureMove}
           onPointerUp={measureUp}
           onPointerLeave={measureUp}
+        />
+      )}
+
+      {/* Full-window capture while dragging a guide out of / along a ruler. */}
+      {guideDrag && (
+        <div
+          className="fixed inset-0 z-[60]"
+          style={{ cursor: guideDrag.axis === "x" ? "ew-resize" : "ns-resize", touchAction: "none" }}
+          onPointerMove={guideMove}
+          onPointerUp={guideUp}
+          onPointerLeave={guideUp}
         />
       )}
 
@@ -1100,10 +1304,58 @@ export default function Stage({
         onUnitChange={changeUnit}
       />
 
+      {/* Pull a guide out of a ruler edge: top → vertical guide (X), left →
+          horizontal guide (Y). Sit above the rulers so they catch the drag. */}
+      {containerSize.w > RULER && containerSize.h > RULER && (
+        <>
+          <div
+            onPointerDown={guideStart("x")}
+            className="absolute z-[41]"
+            style={{ left: RULER, top: 0, width: containerSize.w - RULER, height: RULER, cursor: "col-resize", touchAction: "none" }}
+            title="Drag down to add a vertical guide"
+          />
+          <div
+            onPointerDown={guideStart("y")}
+            className="absolute z-[41]"
+            style={{ left: 0, top: RULER, width: RULER, height: containerSize.h - RULER, cursor: "row-resize", touchAction: "none" }}
+            title="Drag right to add a horizontal guide"
+          />
+        </>
+      )}
+
+      {/* Live guide while dragging: dashed line + precise value at the ruler. */}
+      {guideDrag &&
+        (() => {
+          const color = guideDrag.onRuler ? "#ef4444" : "#22d3ee";
+          const isX = guideDrag.axis === "x";
+          const X = vp.panX + guideDrag.value * vp.zoom;
+          const Y = vp.panY + guideDrag.value * vp.zoom;
+          const label = guideDrag.onRuler
+            ? "Release to remove"
+            : `${isX ? "X" : "Y"} ${formatRulerValue(guideDrag.value, rulerUnit, isX ? doc.width : doc.height)}`;
+          return (
+            <>
+              <svg className="pointer-events-none absolute inset-0 z-[45] h-full w-full overflow-visible">
+                {isX ? (
+                  <line x1={X} y1={RULER} x2={X} y2={containerSize.h} stroke={color} strokeWidth={1} strokeDasharray="4 3" />
+                ) : (
+                  <line x1={RULER} y1={Y} x2={containerSize.w} y2={Y} stroke={color} strokeWidth={1} strokeDasharray="4 3" />
+                )}
+              </svg>
+              <div
+                className="pointer-events-none absolute z-[46] rounded font-medium tabular-nums"
+                style={{ left: isX ? X + 4 : RULER + 4, top: isX ? RULER + 4 : Y + 4, padding: "1px 6px", fontSize: 11, color: "#06212a", background: color, whiteSpace: "nowrap" }}
+              >
+                {label}
+              </div>
+            </>
+          );
+        })()}
+
       {/* Zoom controls (stop pointer events from reaching the pan handler). */}
       <div
         onPointerDown={(e) => e.stopPropagation()}
-        className="absolute bottom-4 left-4 z-30 flex items-center gap-0.5 rounded-lg border border-zinc-700 bg-zinc-900/90 p-1 text-zinc-300 shadow-lg backdrop-blur"
+        className="absolute bottom-4 left-7 z-30 flex items-center gap-0.5 rounded-lg border border-zinc-700 bg-zinc-900/90 p-1 text-zinc-300 shadow-lg backdrop-blur"
       >
         <button
           onClick={() => applyZoom(vp.zoom / 1.25)}

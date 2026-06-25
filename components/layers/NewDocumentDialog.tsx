@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { emptyDoc, type Doc } from "@/lib/doc/types";
+import { useEscapeKey } from "@/lib/useEscapeKey";
 
 const PRESETS: { label: string; w: number; h: number }[] = [
   { label: "Square 1080", w: 1080, h: 1080 },
@@ -24,6 +25,7 @@ export default function NewDocumentDialog({
   const [transparent, setTransparent] = useState(false);
   const [bg, setBg] = useState("#ffffff");
   const fileRef = useRef<HTMLInputElement>(null);
+  useEscapeKey(() => onCancel?.());
 
   const create = () => {
     const w = Math.max(1, Math.round(width));
@@ -32,9 +34,9 @@ export default function NewDocumentDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
+    <div className="animate-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onCancel}>
       <div
-        className="w-[26rem] rounded-xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl"
+        className="animate-dialog w-[26rem] max-w-full rounded-xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="mb-4 text-sm font-semibold text-white">New document</h2>

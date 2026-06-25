@@ -2,7 +2,7 @@ import type { Doc } from "./types";
 import type { AssetCache } from "./assetCache";
 import { renderDocToCanvas } from "./render";
 import { editImage, DEFAULT_MODEL } from "@/lib/gemini";
-import { imageToBase64, base64ToImage } from "@/lib/canvas-utils";
+import { imageToBase64, base64ToImage, maskCanvasToBlackWhite } from "@/lib/canvas-utils";
 import { cropInpaintToPatches, getMaskRegions, padBBox, type BBox } from "@/lib/crop-inpaint-stitch";
 import { inpaint as localInpaint, type LoadProgress } from "@/lib/local-inpaint";
 
@@ -20,18 +20,14 @@ const EDIT_PAD_PX = 24; // doc px added on each side of the selection
 const GEMINI_CROP = { targetSize: 1024, padPx: EDIT_PAD_PX, blendRadius: 16, square: false };
 const LOCAL_CROP = { targetSize: 512, padPx: EDIT_PAD_PX, blendRadius: 12, square: false };
 
-// Seam-blending guidance only. Deliberately domain-agnostic and non-overriding:
-// it must NOT tell the model to keep colors/lighting/style/texture fixed, since
-// that would countermand legitimate edits (recolor, relight, restyle) and fight
-// reference-image edits. The single guardrail — "only what the instruction
-// describes" — keeps the model from rewriting the whole region unprompted.
-const STYLE_PRESERVE =
-  "Apply only the change described in the instruction, and blend it seamlessly " +
-  "into the surrounding image so the edited region's edges have no visible seams.";
-
+// `finalPrompt` is the fully-assembled instruction (assemblePrompt, isolated +
+// maskAware) — sent verbatim. We also attach a black/white mask of the selection
+// so the model edits only the marked shape, not the whole rectangular crop (which
+// otherwise includes the surrounding border pixels the crop unavoidably contains).
 async function geminiInpaintCrop(
-  prompt: string,
+  finalPrompt: string,
   croppedImage: HTMLCanvasElement,
+  croppedMask: HTMLCanvasElement,
   referenceImage?: string,
   signal?: AbortSignal
 ): Promise<HTMLCanvasElement> {
@@ -42,9 +38,12 @@ async function geminiInpaintCrop(
   const result = await editImage({
     apiKey,
     model,
-    prompt: `${prompt}. ${STYLE_PRESERVE}`,
+    prompt: finalPrompt,
+    rawPrompt: true,
     image: imageToBase64(croppedImage),
     mimeType: "image/png",
+    maskImage: imageToBase64(maskCanvasToBlackWhite(croppedMask)),
+    maskMimeType: "image/png",
     referenceImage,
     referenceMimeType: referenceImage ? "image/png" : undefined,
     signal,
@@ -62,7 +61,9 @@ export type AreaBackend = "gemini" | "local";
 
 export interface AreaEditOptions {
   backend: AreaBackend;
-  prompt?: string;
+  // Fully-assembled instruction (assemblePrompt) — sent verbatim. Ignored by the
+  // local backend, which needs no prompt.
+  finalPrompt?: string;
   referenceImage?: string;
   onProgress?: (p: LoadProgress) => void;
   signal?: AbortSignal;
@@ -112,7 +113,7 @@ export async function editMaskedRegionPatches(
   return cropInpaintToPatches(
     flat,
     maskCanvas,
-    async (img) => geminiInpaintCrop(opts.prompt ?? "", img, opts.referenceImage, opts.signal),
+    async (img, msk) => geminiInpaintCrop(opts.finalPrompt ?? "", img, msk, opts.referenceImage, opts.signal),
     GEMINI_CROP
   );
 }

@@ -1,4 +1,4 @@
-import type { Annotation, BlendMode, Doc, Layer, ShapeLayer, TextLayer, Transform } from "./types";
+import type { AiEditRecipe, Annotation, BlendMode, Doc, Layer, ShapeLayer, TextLayer, Transform } from "./types";
 
 // Pure present-state transitions. No history, no DOM, no bitmaps — `LAYER_ADD`
 // assumes the caller already put any referenced bitmap in the AssetCache, so the
@@ -19,6 +19,9 @@ export type DocAction =
   | { type: "LAYER_PATCH_TEXT"; id: string; patch: Partial<TextLayer> }
   | { type: "LAYER_PATCH_SHAPE"; id: string; patch: Partial<ShapeLayer> }
   | { type: "LAYER_SPLIT"; id: string; newLayers: Layer[] } // replace one layer with its slices
+  // Swap a raster layer's bitmap in place (keeps id/name/transform/opacity/order)
+  // — used when a reprompt of an AI-edit layer is accepted.
+  | { type: "LAYER_REPLACE_RASTER"; id: string; assetId: string; naturalWidth: number; naturalHeight: number; aiEdit?: AiEditRecipe }
   | { type: "LAYER_GROUP"; ids: string[]; groupId: string }
   | { type: "LAYER_UNGROUP"; groupId: string }
   | { type: "ANNOTATION_ADD"; annotation: Annotation }
@@ -97,6 +100,13 @@ export function docReducer(doc: Doc, action: DocAction): Doc {
       if (idx < 0) return doc;
       return { ...doc, layers: [...doc.layers.slice(0, idx), ...action.newLayers, ...doc.layers.slice(idx + 1)] };
     }
+
+    case "LAYER_REPLACE_RASTER":
+      return mapLayer(doc, action.id, (l) =>
+        l.type === "raster"
+          ? { ...l, assetId: action.assetId, naturalWidth: action.naturalWidth, naturalHeight: action.naturalHeight, aiEdit: action.aiEdit }
+          : l
+      );
 
     case "LAYER_GROUP": {
       const ids = new Set(action.ids);

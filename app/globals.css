@@ -3,6 +3,7 @@
 :root {
   --background: #09090b;
   --foreground: #fafafa;
+  --accent: #3b82f6;
 }
 
 @theme inline {
@@ -21,9 +22,135 @@ body {
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Use the Geist font the layout loads (was falling back to Arial). */
+  font-family: var(--font-geist-sans), "Segoe UI", system-ui, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
+/* Keyboard focus: a clear ring for users tabbing through the UI. Mouse clicks
+   stay ring-free (:focus-visible). The canvas owns its own interaction model. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+canvas:focus-visible {
+  outline: none;
+}
+
+/* Selection picks up the blue accent instead of the OS default. */
+::selection {
+  background: rgba(59, 130, 246, 0.35);
+}
+
+/* Thin, dark scrollbars that don't fight the chrome. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+  background-clip: padding-box;
+}
+
+/* Range sliders: themed track + thumb (replaces the default OS-blue control). */
 input[type="range"] {
   height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: #3f3f46;
+  border-radius: 9999px;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #fafafa;
+  border: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transition: transform 0.1s ease;
+}
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #fafafa;
+  border: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: #3f3f46;
+  border-radius: 9999px;
+}
+
+/* Native color swatches: tidy them up so they read as part of the dark UI. */
+input[type="color"] {
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid #3f3f46;
+  padding: 0;
+}
+input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+
+/* Dialog entrance — subtle and fast. */
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.animate-overlay {
+  animation: overlay-in 0.12s ease-out;
+}
+.animate-dialog {
+  animation: dialog-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-overlay,
+  .animate-dialog {
+    animation: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    transition: none;
+  }
 }

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { MODELS, DEFAULT_MODEL } from "@/lib/gemini";
+import { useEscapeKey } from "@/lib/useEscapeKey";
 
 export type InpaintBackend = "gemini" | "local";
 
@@ -25,6 +26,8 @@ export default function SettingsDialog({ open, onClose }: Props) {
     setKeyError(null);
   }, [open]);
 
+  useEscapeKey(onClose);
+
   function save() {
     if (backend === "gemini") {
       const key = apiKey.trim();
@@ -46,9 +49,9 @@ export default function SettingsDialog({ open, onClose }: Props) {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div className="animate-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-md shadow-2xl"
+        className="animate-dialog bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-md shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold text-white mb-4">Settings</h2>

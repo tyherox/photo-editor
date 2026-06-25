@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { upscale } from "@/lib/local-upscale";
+import { useEscapeKey } from "@/lib/useEscapeKey";
 
 interface Props {
   imageDataUrl: string;
@@ -16,6 +17,7 @@ export default function ReferenceCropModal({ imageDataUrl, onConfirm, onCancel }
   const [start, setStart] = useState<{ x: number; y: number } | null>(null);
   const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [scale, setScale] = useState(1);
+  useEscapeKey(onCancel);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -123,11 +125,11 @@ export default function ReferenceCropModal({ imageDataUrl, onConfirm, onCancel }
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+      className="animate-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
       onClick={onCancel}
     >
       <div
-        className="bg-zinc-900 rounded-xl border border-zinc-700 p-4 flex flex-col gap-3 max-w-[90vw] max-h-[90vh]"
+        className="animate-dialog bg-zinc-900 rounded-xl border border-zinc-700 p-4 flex flex-col gap-3 max-w-[90vw] max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">

@@ -35,12 +35,26 @@ export interface LayerBase {
   groupId?: string;  // layers sharing a groupId are selected/moved as one unit
 }
 
+// An AI edit's "recipe": the minimum needed to reprompt a generated layer after
+// it's been accepted (and across reloads). `sourceAssetId` is a cached snapshot
+// of the exact image the model saw for the step that produced this layer, so
+// Retry can re-roll the same instruction against the same input; Edit instead
+// runs a new instruction over the layer's CURRENT bitmap. Lives on the layer
+// (not just in the ephemeral job) so the recipe survives accept + persistence.
+export interface AiEditRecipe {
+  prompt: string;
+  sourceAssetId: string;
+  bbox: { x: number; y: number; w: number; h: number }; // doc-space placement
+  referenceImage?: string; // base64 reference image, if one was used
+}
+
 // Heavy bitmaps live in the AssetCache keyed by `assetId` — never in the Doc.
 export interface RasterLayer extends LayerBase {
   type: "raster";
   assetId: string;
   naturalWidth: number;  // intrinsic px of the bitmap (the local content box)
   naturalHeight: number;
+  aiEdit?: AiEditRecipe;  // present only on AI-generated layers (enables reprompt)
 }
 
 export type TextAlign = "left" | "center" | "right";
@@ -98,7 +112,18 @@ export interface AreaAnnotation {
   splitCount: number; // number of equal sections (>= 1)
 }
 
-export type Annotation = RulerAnnotation | AreaAnnotation;
+// A single straight guide line spanning the whole canvas, pinned to one doc
+// coordinate. `axis: "x"` is a vertical line at doc x = `value` (dragged out of
+// the left ruler); `axis: "y"` is a horizontal line at doc y = `value` (dragged
+// out of the top ruler). Guides double as snap targets for laying out elements.
+export interface GuideAnnotation {
+  type: "guide";
+  id: string;
+  axis: "x" | "y";
+  value: number; // doc coord
+}
+
+export type Annotation = RulerAnnotation | AreaAnnotation | GuideAnnotation;
 
 export interface Doc {
   id: string;
@@ -149,9 +174,10 @@ export function makeRasterLayer(
   naturalWidth: number,
   naturalHeight: number,
   transform: Transform,
-  name = "Image"
+  name = "Image",
+  aiEdit?: AiEditRecipe
 ): RasterLayer {
-  return { ...baseLayer(name, transform), type: "raster", assetId, naturalWidth, naturalHeight };
+  return { ...baseLayer(name, transform), type: "raster", assetId, naturalWidth, naturalHeight, ...(aiEdit ? { aiEdit } : {}) };
 }
 
 export function makeTextLayer(
@@ -205,6 +231,10 @@ export function makeRuler(ax: number, ay: number, bx: number, by: number): Ruler
 
 export function makeArea(x: number, y: number, w: number, h: number): AreaAnnotation {
   return { type: "area", id: newId(), x, y, w, h, splitAxis: "none", splitCount: 1 };
+}
+
+export function makeGuide(axis: "x" | "y", value: number): GuideAnnotation {
+  return { type: "guide", id: newId(), axis, value };
 }
 
 // Division line positions (doc coords) within a split area, used by both the

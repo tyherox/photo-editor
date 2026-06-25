@@ -7,6 +7,14 @@ export interface GeminiEditRequest {
   referenceImage?: string;
   referenceMimeType?: string;
   signal?: AbortSignal;
+  // When true, `prompt` is the FULLY-assembled instruction (see promptAssembly.ts)
+  // and the route sends it verbatim — no server-side wrapping. This keeps a single
+  // visible source of truth for what the model receives.
+  rawPrompt?: boolean;
+  // Isolated edits attach a black/white mask (white = the area to change) so the
+  // model edits only the marked shape, not the whole rectangular crop.
+  maskImage?: string;
+  maskMimeType?: string;
   // Context-aware region edit: `image` is the clean full scene, `contextHintImage`
   // is the same scene with the edit region outlined in magenta. The model is told
   // to change only that region; the caller composites just the masked pixels back,

@@ -97,6 +97,8 @@ export function computeSnap(
     if (a.type === "ruler") {
       xs.push({ value: a.ax, kind: "magnet" }, { value: a.bx, kind: "magnet" }, { value: (a.ax + a.bx) / 2, kind: "magnet" });
       ys.push({ value: a.ay, kind: "magnet" }, { value: a.by, kind: "magnet" }, { value: (a.ay + a.by) / 2, kind: "magnet" });
+    } else if (a.type === "guide") {
+      (a.axis === "x" ? xs : ys).push({ value: a.value, kind: "magnet" });
     } else {
       xs.push({ value: a.x, kind: "magnet" }, { value: a.x + a.w, kind: "magnet" }, { value: a.x + a.w / 2, kind: "magnet" });
       ys.push({ value: a.y, kind: "magnet" }, { value: a.y + a.h, kind: "magnet" }, { value: a.y + a.h / 2, kind: "magnet" });
