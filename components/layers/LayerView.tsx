@@ -51,7 +51,11 @@ export default function LayerView({
           alt={layer.name}
           draggable={false}
           onPointerDown={onPointerDown}
-          style={{ ...base, width: layer.naturalWidth, height: layer.naturalHeight, display: "block" }}
+          // maxWidth/maxHeight "none" overrides Tailwind preflight's
+          // `img { max-width: 100% }`, which would otherwise clamp a layer whose
+          // natural size exceeds the doc box (e.g. a hi-res 2×/4× sharpen patch:
+          // naturalWidth = bbox.w × scale) — clamping width but not height skews it.
+          style={{ ...base, width: layer.naturalWidth, height: layer.naturalHeight, maxWidth: "none", maxHeight: "none", display: "block" }}
         />
       );
     }

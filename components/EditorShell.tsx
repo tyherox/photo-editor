@@ -5,6 +5,7 @@ import { AssetCache } from "@/lib/doc/assetCache";
 import { DocProvider, useAssetCache, useCanUndoRedo, useDoc, useDocActions, useWorkspace } from "@/lib/doc/DocContext";
 import type { InitialTab } from "@/lib/doc/workspace";
 import { docFromImageFile } from "@/lib/doc/docFromImage";
+import { dragHasFiles, imageFilesFromDataTransfer, validateImageFile } from "@/lib/image-import";
 import {
   defaultTransform,
   makeRasterLayer,
@@ -18,9 +19,11 @@ import {
   type ShapeKind,
 } from "@/lib/doc/types";
 import { hasVisibleContent, renderDocToCanvas, renderLayersToCanvas } from "@/lib/doc/render";
+import { canvasToBlob, saveImage } from "@/lib/download";
 import { aiEditCanvas } from "@/lib/doc/aiEditDoc";
 import { cropRegions, editMaskedRegionPatches, reservedBBox, type AreaBackend } from "@/lib/doc/maskEdit";
 import { editRegionWithContextPatches } from "@/lib/doc/contextEdit";
+import { sharpenMaskedRegionPatches } from "@/lib/doc/sharpenEdit";
 import { assemblePrompt } from "@/lib/doc/promptAssembly";
 import { splitRasterLayer } from "@/lib/doc/splitLayer";
 import type { BBox } from "@/lib/crop-inpaint-stitch";
@@ -35,6 +38,7 @@ import ReferenceCropModal from "@/components/ReferenceCropModal";
 import PromptPreviewModal from "@/components/PromptPreviewModal";
 import TabBar from "@/components/layers/TabBar";
 import ProjectsDialog from "@/components/ProjectsDialog";
+import ResolutionCompareModal from "@/components/ResolutionCompareModal";
 import { usePersistence } from "@/lib/persist/usePersistence";
 import {
   deleteProject,
@@ -89,11 +93,22 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
   const [showNew, setShowNew] = useState(false);
   const [showOpen, setShowOpen] = useState(false);
 
-  // Open a new canvas from an image file (sized to the image).
-  const newFromImage = useCallback(
-    async (file: File) => {
-      const { doc: d } = await docFromImageFile(file, cache);
-      openTab(d);
+  // Open one new tab per image (each sized to its image). Validates each file
+  // and activates only the first valid one so a multi-drop lands you on the
+  // first image rather than the last.
+  const newFromImages = useCallback(
+    async (files: File[]) => {
+      let activated = false;
+      for (const file of files) {
+        const err = validateImageFile(file);
+        if (err) {
+          setError(err);
+          continue;
+        }
+        const { doc: d } = await docFromImageFile(file, cache);
+        openTab(d, !activated);
+        activated = true;
+      }
     },
     [cache, openTab]
   );
@@ -114,9 +129,43 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
     [cache, isOpen, activateTab, markPersisted, openTab]
   );
 
+  // Editor-wide image drop: drag images anywhere over the editor to open one new
+  // tab each. A nesting-depth counter keeps the highlight stable as the drag
+  // crosses child elements (dragenter/leave fire per element).
+  const [fileDragOver, setFileDragOver] = useState(false);
+  const dragDepth = useRef(0);
+  const onFileDragEnter = useCallback((e: React.DragEvent) => {
+    if (!dragHasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setFileDragOver(true);
+  }, []);
+  const onFileDragOver = useCallback((e: React.DragEvent) => {
+    if (!dragHasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, []);
+  const onFileDragLeave = useCallback((e: React.DragEvent) => {
+    if (!dragHasFiles(e.dataTransfer)) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setFileDragOver(false);
+  }, []);
+  const onFileDrop = useCallback(
+    (e: React.DragEvent) => {
+      if (!dragHasFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      dragDepth.current = 0;
+      setFileDragOver(false);
+      const files = imageFilesFromDataTransfer(e.dataTransfer);
+      if (files.length) void newFromImages(files);
+    },
+    [newFromImages]
+  );
+
   const [mode, setMode] = useState<EditorMode>("manual");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [maskTool, setMaskTool] = useState<"brush" | "rect">("rect");
@@ -133,6 +182,12 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
   // Masked Gemini edits are context-aware by default (the model sees the whole
   // scene); "isolated" opts into the legacy crop-only path for max-detail fixes.
   const [isolated, setIsolated] = useState(false);
+  // Strength for the algorithmic "Sharpen" action (unsharp amount; slider 1 = none).
+  const [sharpenAmount, setSharpenAmount] = useState(5);
+  // Output resolution for Sharpen: 1× (in place) or 2×/4× (re-rasterize crisper).
+  const [sharpenScale, setSharpenScale] = useState(1);
+  // Anti-alias Sharpen edges via internal supersampling (smoother, slightly slower).
+  const [sharpenSmooth, setSharpenSmooth] = useState(true);
   // Advanced: when on, every Gemini edit first shows the fully-assembled prompt in
   // an editable preview so nothing is sent unseen. Persisted across sessions.
   const [advancedPrompt, setAdvancedPrompt] = useState(false);
@@ -163,6 +218,19 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
       /* no/corrupt history — start empty */
     }
     setAdvancedPrompt(localStorage.getItem("ai-advanced-prompt") === "1");
+    const fmt = localStorage.getItem("download-format");
+    if (fmt === "jpeg" || fmt === "png") setDownloadFormat(fmt);
+  }, []);
+
+  // Remembered download format (PNG vs JPEG), persisted across sessions.
+  const [downloadFormat, setDownloadFormat] = useState<"png" | "jpeg">("png");
+  const chooseDownloadFormat = useCallback((fmt: "png" | "jpeg") => {
+    setDownloadFormat(fmt);
+    try {
+      localStorage.setItem("download-format", fmt);
+    } catch {
+      /* storage unavailable — preference just won't persist */
+    }
   }, []);
 
   const toggleAdvancedPrompt = useCallback(() => {
@@ -262,11 +330,14 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
       let lastId: string | null = null;
       for (const { bbox, patch } of patches) {
         const assetId = await cacheCanvasAsset(patch);
+        // A patch may carry MORE pixels than its bbox (hi-res sharpen): scale the
+        // layer down so it occupies the bbox in doc units but keeps the extra
+        // detail. For normal 1:1 patches this is exactly 1.
         const layer = makeRasterLayer(
           assetId,
           patch.width,
           patch.height,
-          { x: bbox.x, y: bbox.y, scaleX: 1, scaleY: 1, rotation: 0 },
+          { x: bbox.x, y: bbox.y, scaleX: bbox.w / patch.width, scaleY: bbox.h / patch.height, rotation: 0 },
           "AI edit",
           recipe ? { ...recipe, bbox } : undefined
         );
@@ -409,13 +480,29 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
     [doc.width, doc.height, doAction]
   );
 
+  // Encode a rendered canvas to a download Blob in the chosen format. JPEG has no
+  // alpha, so transparent areas are flattened onto white first.
+  const encodeForDownload = useCallback((rendered: HTMLCanvasElement, format: "png" | "jpeg") => {
+    if (format !== "jpeg") return canvasToBlob(rendered, "image/png");
+    const c2 = document.createElement("canvas");
+    c2.width = rendered.width;
+    c2.height = rendered.height;
+    const cx = c2.getContext("2d")!;
+    cx.fillStyle = "#ffffff";
+    cx.fillRect(0, 0, c2.width, c2.height);
+    cx.drawImage(rendered, 0, 0);
+    return canvasToBlob(c2, "image/jpeg", 0.92);
+  }, []);
+
   const download = useCallback(() => {
-    const canvas = renderDocToCanvas(doc, cache);
-    const a = document.createElement("a");
-    a.download = `${doc.name || "export"}.png`;
-    a.href = canvas.toDataURL("image/png");
-    a.click();
-  }, [doc, cache]);
+    const ext = downloadFormat === "jpeg" ? "jpg" : "png";
+    const mime = downloadFormat === "jpeg" ? "image/jpeg" : "image/png";
+    // Render lazily inside saveImage so the picker opens within the user gesture
+    // (and we skip the work entirely if the save dialog is cancelled).
+    return saveImage(`${doc.name || "export"}.${ext}`, mime, ext, () =>
+      encodeForDownload(renderDocToCanvas(doc, cache), downloadFormat)
+    );
+  }, [doc, cache, downloadFormat, encodeForDownload]);
 
   // Export one or more layers as PNG (transparent) or JPEG (white-matted),
   // cropped to their combined bounding box. Multiple layers flatten into one
@@ -424,27 +511,15 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
     (ids: string[], format: "png" | "jpeg") => {
       const layers = doc.layers.filter((l) => ids.includes(l.id)); // doc order = back→front
       if (!layers.length) return;
-      const rendered = renderLayersToCanvas(layers, cache);
-      let out = rendered;
-      if (format === "jpeg") {
-        // JPEG has no alpha — flatten onto white so transparent edges aren't black.
-        const c2 = document.createElement("canvas");
-        c2.width = rendered.width;
-        c2.height = rendered.height;
-        const cx = c2.getContext("2d")!;
-        cx.fillStyle = "#ffffff";
-        cx.fillRect(0, 0, c2.width, c2.height);
-        cx.drawImage(rendered, 0, 0);
-        out = c2;
-      }
       const base = layers.length === 1 ? layers[0].name || "layer" : `${doc.name || "export"}-group`;
       const safe = base.replace(/[^\w.-]+/g, "_") || "layer";
-      const a = document.createElement("a");
-      a.download = `${safe}.${format === "jpeg" ? "jpg" : "png"}`;
-      a.href = format === "jpeg" ? out.toDataURL("image/jpeg", 0.92) : out.toDataURL("image/png");
-      a.click();
+      const ext = format === "jpeg" ? "jpg" : "png";
+      const mime = format === "jpeg" ? "image/jpeg" : "image/png";
+      return saveImage(`${safe}.${ext}`, mime, ext, () =>
+        encodeForDownload(renderLayersToCanvas(layers, cache), format)
+      );
     },
-    [doc.layers, doc.name, cache]
+    [doc.layers, doc.name, cache, encodeForDownload]
   );
 
   // --- Interactive split: position cut lines on a raster layer, then apply ---
@@ -557,6 +632,32 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
     },
     [doc, cache, prompt, maskDirty, freezeArmed, isolated, referenceImage, launch, overlapsReserved, clearMask, recordPrompt, cacheCanvasAsset, confirmPrompt]
   );
+
+  // Algorithmic "Sharpen": crispen the masked area's edges locally (no model, no
+  // network) while preserving font style and color. Runs through the same job /
+  // review / accept flow as Remove and Generate, so the result lands as a new
+  // raster layer the user can accept or reject.
+  const sharpenArea = useCallback(() => {
+    const mask = maskCanvasRef.current;
+    if (!mask || !maskDirty) return;
+    const bbox = reservedBBox(mask);
+    if (!bbox) return;
+    if (overlapsReserved(bbox)) {
+      setError("That region overlaps one that's already generating or frozen.");
+      return;
+    }
+    const snap = snapshotCanvas(mask);
+    const amount = sharpenAmount - 1; // slider 1 = no sharpen
+    const scale = sharpenScale;
+    const id = launch({
+      backend: "local",
+      prompt: scale > 1 ? `Sharpen ${scale}×` : "Sharpen",
+      bbox,
+      freeze: freezeArmed,
+      run: () => sharpenMaskedRegionPatches(doc, cache, snap, { amount, scale, supersample: sharpenSmooth }),
+    });
+    if (id) clearMask();
+  }, [doc, cache, maskDirty, freezeArmed, sharpenAmount, sharpenScale, sharpenSmooth, launch, overlapsReserved, clearMask]);
 
   // "Edit" a reviewed result with a DIFFERENT instruction: re-edit the just-
   // generated patch(es) (input = the generated image, not the original) and put
@@ -759,13 +860,31 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
   const frozen = reservations.filter((r) => r.kind === "frozen");
 
   return (
-    <div className="flex h-full flex-col bg-zinc-950">
+    <div
+      className="relative flex h-full flex-col bg-zinc-950"
+      onDragEnter={onFileDragEnter}
+      onDragOver={onFileDragOver}
+      onDragLeave={onFileDragLeave}
+      onDrop={onFileDrop}
+    >
+      {fileDragOver && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-blue-950/40 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-blue-400 bg-zinc-900/90 px-10 py-8 shadow-2xl">
+            <svg className="h-10 w-10 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16" />
+            </svg>
+            <p className="text-sm font-medium text-blue-100">Drop images to open each in a new tab</p>
+          </div>
+        </div>
+      )}
       <TabBar onNew={() => setShowNew(true)} />
       <header className="flex flex-wrap items-center gap-1 border-b border-zinc-800 bg-zinc-900 px-3 py-2">
         <span className="mr-2 text-sm font-semibold tracking-wide text-white">Photo Editor</span>
         <button className={btn} onClick={() => setShowNew(true)}>New</button>
         <button className={btn} onClick={() => setShowOpen(true)}>Open</button>
         <button className={btn} onClick={saveNow}>Save</button>
+        <span className="mx-1 h-5 w-px bg-zinc-700" aria-hidden="true" />
+        <button className={btn} onClick={() => setCompareOpen(true)} title="Compare two images for actual visual resolution">Compare</button>
         <span className="w-16 text-xs text-zinc-500" aria-live="polite">
           {saveStatus === "saving"
             ? "Saving…"
@@ -779,7 +898,19 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
         <div className="ml-auto flex items-center gap-1">
           <button className={btn} onClick={undo} disabled={!canUndo} title="Undo (⌘Z)">Undo</button>
           <button className={btn} onClick={redo} disabled={!canRedo} title="Redo (⌘⇧Z)">Redo</button>
-          <button className={btn} onClick={download} title="Download PNG (⌘S)">Download</button>
+          <div className="flex items-center overflow-hidden rounded-md border border-zinc-700" title="Download format — remembered for next time">
+            {(["png", "jpeg"] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => chooseDownloadFormat(f)}
+                aria-pressed={downloadFormat === f}
+                className={`px-1.5 py-1 text-xs uppercase transition-colors ${downloadFormat === f ? "bg-zinc-700 text-white" : "text-zinc-400 hover:bg-zinc-800 hover:text-white"}`}
+              >
+                {f === "jpeg" ? "JPG" : "PNG"}
+              </button>
+            ))}
+          </div>
+          <button className={btn} onClick={download} title={`Download ${downloadFormat === "jpeg" ? "JPG" : "PNG"} (⌘S)`}>Download</button>
           <button className={`${btn} flex items-center`} onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Settings">
             <svg className="h-[18px] w-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
@@ -975,6 +1106,43 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
                 Isolated
               </button>
             </div>
+            <span className="mx-1 h-5 w-px bg-zinc-700" />
+            <label
+              className="flex items-center gap-1.5 text-sm text-zinc-400"
+              title="Sharpen strength — how hard the algorithmic Sharpen crispens the masked area"
+            >
+              Sharpen
+              <input
+                type="range"
+                min={1}
+                max={8}
+                step={0.1}
+                value={sharpenAmount}
+                onChange={(e) => setSharpenAmount(Number(e.target.value))}
+                className="w-20"
+              />
+            </label>
+            <div
+              className="flex overflow-hidden rounded-md border border-zinc-700"
+              title="Sharpen output resolution — 2×/4× re-rasterizes the masked area at higher detail (crisper when zoomed or exported)"
+            >
+              {[1, 2, 4].map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setSharpenScale(s)}
+                  className={`px-2 py-1.5 text-sm transition-colors ${sharpenScale === s ? "bg-zinc-700 text-white" : "text-zinc-400 hover:bg-zinc-800 hover:text-white"}`}
+                >
+                  {s}×
+                </button>
+              ))}
+            </div>
+            <button
+              className={`${btn} ${sharpenSmooth ? "bg-blue-900/50 text-blue-200" : ""}`}
+              onClick={() => setSharpenSmooth((v) => !v)}
+              title="Smooth — anti-alias sharpened edges via internal supersampling. Off gives harder, faster edges that can stair-step."
+            >
+              Smooth
+            </button>
             <span className="mx-1 h-5 w-px bg-zinc-700" />
             <button
               className={`${btn} ${advancedPrompt ? "bg-zinc-800 text-white" : ""}`}
@@ -1211,6 +1379,15 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
                 Remove
               </button>
             )}
+            {maskDirty && (
+              <button
+                onClick={sharpenArea}
+                title="Sharpen the masked area algorithmically — crispens text edges while preserving font style and color (on-device, no AI/prompt)"
+                className="whitespace-nowrap rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-600"
+              >
+                Sharpen
+              </button>
+            )}
             {maskDirty ? (
               <button
                 onClick={() => generateArea("gemini")}
@@ -1262,6 +1439,8 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
+      {compareOpen && <ResolutionCompareModal onClose={() => setCompareOpen(false)} />}
+
       {showNew && (
         <NewDocumentDialog
           onCreate={(d) => {
@@ -1269,7 +1448,7 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
             setShowNew(false);
           }}
           onCreateFromImage={async (f) => {
-            await newFromImage(f);
+            await newFromImages([f]);
             setShowNew(false);
           }}
           onCancel={() => setShowNew(false)}
@@ -1289,7 +1468,7 @@ function EditorBody({ seedByProject }: { seedByProject?: Record<string, string[]
             setShowNew(true);
           }}
           onNewFromImage={async (f) => {
-            await newFromImage(f);
+            await newFromImages([f]);
             setShowOpen(false);
           }}
           onClose={() => setShowOpen(false)}
@@ -1386,10 +1565,14 @@ export default function EditorShell() {
     setBoot({ tabs: [{ doc: d, assetIds: [] }], activeId: d.id, seed: {} });
   }, []);
 
-  const startWithImage = useCallback(
-    async (file: File) => {
-      const { doc, assetIds } = await docFromImageFile(file, cache);
-      setBoot({ tabs: [{ doc, assetIds }], activeId: doc.id, seed: {} });
+  const startWithImages = useCallback(
+    async (files: File[]) => {
+      const tabs: InitialTab[] = [];
+      for (const file of files) {
+        const { doc, assetIds } = await docFromImageFile(file, cache);
+        tabs.push({ doc, assetIds });
+      }
+      if (tabs.length) setBoot({ tabs, activeId: tabs[0].doc.id, seed: {} });
     },
     [cache]
   );
@@ -1438,7 +1621,7 @@ export default function EditorShell() {
           )}
           <div className="text-xs text-zinc-500">or open an image</div>
           <div className="h-64 w-full">
-            <ImageUpload onImageLoad={startWithImage} />
+            <ImageUpload onImagesLoad={startWithImages} />
           </div>
         </div>
         {showNew && (
@@ -1448,7 +1631,7 @@ export default function EditorShell() {
               setShowNew(false);
             }}
             onCreateFromImage={async (f) => {
-              await startWithImage(f);
+              await startWithImages([f]);
               setShowNew(false);
             }}
             onCancel={() => setShowNew(false)}
@@ -1467,7 +1650,7 @@ export default function EditorShell() {
               setShowNew(true);
             }}
             onNewFromImage={async (f) => {
-              await startWithImage(f);
+              await startWithImages([f]);
               setShowOpen(false);
             }}
             onClose={() => setShowOpen(false)}

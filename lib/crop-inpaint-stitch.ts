@@ -249,7 +249,7 @@ export function stitchBack(
   return result;
 }
 
-function boxBlur(
+export function boxBlur(
   input: Float32Array,
   w: number,
   h: number,

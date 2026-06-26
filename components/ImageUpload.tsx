@@ -1,48 +1,49 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import {
+  MAX_IMAGE_MB,
+  imageFilesFromDataTransfer,
+  validateImageFile,
+} from "@/lib/image-import";
 
 interface Props {
-  onImageLoad: (file: File) => void;
+  // Called once per dropped/selected batch with every valid image file. Single
+  // and multi behave the same — single is just a batch of one.
+  onImagesLoad: (files: File[]) => void;
   onError?: (message: string) => void;
 }
 
-const MAX_SIZE_MB = 250;
-const ACCEPTED = ["image/png", "image/jpeg", "image/webp"];
-
-export default function ImageUpload({ onImageLoad, onError }: Props) {
+export default function ImageUpload({ onImagesLoad, onError }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
   const validateAndLoad = useCallback(
-    (file: File | undefined) => {
-      if (!file) return;
-      if (!ACCEPTED.includes(file.type)) {
-        onError?.("Unsupported file type. Please use PNG, JPG, or WebP.");
-        return;
+    (files: File[]) => {
+      if (!files.length) return;
+      const valid: File[] = [];
+      for (const file of files) {
+        const err = validateImageFile(file);
+        if (err) onError?.(err);
+        else valid.push(file);
       }
-      if (file.size > MAX_SIZE_MB * 1024 * 1024) {
-        const mb = (file.size / (1024 * 1024)).toFixed(1);
-        onError?.(`Image is ${mb} MB — the limit is ${MAX_SIZE_MB} MB. Try a smaller file.`);
-        return;
-      }
-      onImageLoad(file);
+      if (valid.length) onImagesLoad(valid);
     },
-    [onImageLoad, onError]
+    [onImagesLoad, onError]
   );
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      validateAndLoad(e.dataTransfer.files[0]);
+      validateAndLoad(imageFilesFromDataTransfer(e.dataTransfer));
     },
     [validateAndLoad]
   );
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      validateAndLoad(e.target.files?.[0]);
+      validateAndLoad(Array.from(e.target.files ?? []));
       e.target.value = "";
     },
     [validateAndLoad]
@@ -66,12 +67,13 @@ export default function ImageUpload({ onImageLoad, onError }: Props) {
       <svg className="w-12 h-12 text-zinc-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16" />
       </svg>
-      <p className="text-zinc-400 text-sm">Drop an image here or click to upload</p>
-      <p className="text-zinc-600 text-xs mt-1">PNG, JPG, WebP · up to {MAX_SIZE_MB} MB</p>
+      <p className="text-zinc-400 text-sm">Drop images here or click to upload</p>
+      <p className="text-zinc-600 text-xs mt-1">PNG, JPG, WebP · up to {MAX_IMAGE_MB} MB · multiple open in tabs</p>
       <input
         ref={inputRef}
         type="file"
         accept="image/png,image/jpeg,image/webp"
+        multiple
         onChange={handleChange}
         className="hidden"
       />
